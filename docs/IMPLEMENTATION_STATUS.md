@@ -26,6 +26,10 @@ Last updated: 2026-02-07
   - full-sequence accuracy
   - character accuracy
   - average edit distance
+- Upgraded DET training core:
+  - dual-branch output (`shrink`, `threshold`)
+  - DB-style composite loss (BCE + L1 weighted)
+  - configurable shrink/threshold map generation via config (`Loss.det_*`)
 - Unified export manifest schema with `schema_version=1.0`.
 - Added `service test` runtime controls:
   - `--parallel`

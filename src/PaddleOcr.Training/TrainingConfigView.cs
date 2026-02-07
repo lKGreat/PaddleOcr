@@ -35,6 +35,11 @@ internal sealed class TrainingConfigView
     public string EvalDataDir => ResolvePath(GetString("Eval.dataset.data_dir", DataDir));
     public string InvalidSamplePolicy => GetString("Train.dataset.invalid_sample_policy", "skip").Trim().ToLowerInvariant();
     public int MinValidSamples => GetInt("Train.dataset.min_valid_samples", 1);
+    public float DetShrinkRatio => Clamp(GetFloatAny(["Train.dataset.det_shrink_ratio", "Loss.det_shrink_ratio"], 0.4f), 0.05f, 0.95f);
+    public float DetThreshMin => Clamp(GetFloatAny(["Train.dataset.det_thresh_min", "Loss.det_thresh_min"], 0.3f), 0f, 1f);
+    public float DetThreshMax => Clamp(GetFloatAny(["Train.dataset.det_thresh_max", "Loss.det_thresh_max"], 0.7f), 0f, 1f);
+    public float DetShrinkLossWeight => Math.Max(0f, GetFloatAny(["Loss.det_shrink_loss_weight", "Loss.alpha"], 1f));
+    public float DetThresholdLossWeight => Math.Max(0f, GetFloatAny(["Loss.det_threshold_loss_weight", "Loss.beta"], 0.5f));
 
     public (int C, int H, int W) ImageShape => ParseImageShape();
     public int DetInputSize => GetInt("Train.dataset.transforms.ResizeTextImg.size", 640);
@@ -183,8 +188,26 @@ internal sealed class TrainingConfigView
         return float.TryParse(GetByPath(path)?.ToString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : fallback;
     }
 
+    private float GetFloatAny(IReadOnlyList<string> paths, float fallback)
+    {
+        foreach (var path in paths)
+        {
+            if (float.TryParse(GetByPath(path)?.ToString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var value))
+            {
+                return value;
+            }
+        }
+
+        return fallback;
+    }
+
     private bool GetBool(string path, bool fallback)
     {
         return bool.TryParse(GetByPath(path)?.ToString(), out var v) ? v : fallback;
+    }
+
+    private static float Clamp(float value, float min, float max)
+    {
+        return Math.Clamp(value, min, max);
     }
 }

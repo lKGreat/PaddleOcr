@@ -9,15 +9,24 @@ internal sealed class SimpleDetDataset
 {
     private readonly List<DetSample> _samples;
     private readonly int _size;
+    private readonly float _shrinkRatio;
+    private readonly float _threshMin;
+    private readonly float _threshMax;
 
     public SimpleDetDataset(
         string labelFile,
         string dataDir,
         int inputSize,
         string invalidSamplePolicy = "skip",
-        int minValidSamples = 1)
+        int minValidSamples = 1,
+        float shrinkRatio = 0.4f,
+        float threshMin = 0.3f,
+        float threshMax = 0.7f)
     {
         _size = inputSize;
+        _shrinkRatio = Math.Clamp(shrinkRatio, 0.05f, 0.95f);
+        _threshMin = Math.Clamp(threshMin, 0f, 1f);
+        _threshMax = Math.Clamp(threshMax, _threshMin, 1f);
         var loaded = LoadSamples(labelFile, dataDir, invalidSamplePolicy, minValidSamples);
         _samples = loaded.Samples;
         Audit = loaded.Audit;
@@ -26,7 +35,7 @@ internal sealed class SimpleDetDataset
     public int Count => _samples.Count;
     public DetDataAudit Audit { get; }
 
-    public IEnumerable<(float[] Images, float[] Masks, int Batch)> GetBatches(int batchSize, bool shuffle, Random rng)
+    public IEnumerable<(float[] Images, float[] ShrinkMaps, float[] ThresholdMaps, int Batch)> GetBatches(int batchSize, bool shuffle, Random rng)
     {
         var indices = Enumerable.Range(0, _samples.Count).ToList();
         if (shuffle)
@@ -42,20 +51,22 @@ internal sealed class SimpleDetDataset
         {
             var take = Math.Min(batchSize, indices.Count - offset);
             var images = new float[take * 3 * _size * _size];
-            var masks = new float[take * _size * _size];
+            var shrinkMaps = new float[take * _size * _size];
+            var thresholdMaps = new float[take * _size * _size];
             for (var bi = 0; bi < take; bi++)
             {
                 var sample = _samples[indices[offset + bi]];
-                var (img, mask) = LoadItem(sample);
+                var (img, shrinkMap, thresholdMap) = LoadItem(sample);
                 Array.Copy(img, 0, images, bi * img.Length, img.Length);
-                Array.Copy(mask, 0, masks, bi * mask.Length, mask.Length);
+                Array.Copy(shrinkMap, 0, shrinkMaps, bi * shrinkMap.Length, shrinkMap.Length);
+                Array.Copy(thresholdMap, 0, thresholdMaps, bi * thresholdMap.Length, thresholdMap.Length);
             }
 
-            yield return (images, masks, take);
+            yield return (images, shrinkMaps, thresholdMaps, take);
         }
     }
 
-    private (float[] Image, float[] Mask) LoadItem(DetSample sample)
+    private (float[] Image, float[] ShrinkMap, float[] ThresholdMap) LoadItem(DetSample sample)
     {
         using var img = Image.Load<Rgb24>(sample.ImagePath);
         var srcW = img.Width;
@@ -76,7 +87,8 @@ internal sealed class SimpleDetDataset
             }
         }
 
-        var mask = new float[_size * _size];
+        var fullMask = new float[_size * _size];
+        var shrinkMask = new float[_size * _size];
         foreach (var poly in sample.Polygons)
         {
             var scaled = poly
@@ -86,25 +98,87 @@ internal sealed class SimpleDetDataset
                     Math.Clamp(p[1] * _size / Math.Max(1, srcH), 0, _size - 1)
                 })
                 .ToArray();
-            var xs = scaled.Select(p => p[0]).ToArray();
-            var ys = scaled.Select(p => p[1]).ToArray();
-            var x1 = Math.Clamp(xs.Min(), 0, _size - 1);
-            var y1 = Math.Clamp(ys.Min(), 0, _size - 1);
-            var x2 = Math.Clamp(xs.Max(), 0, _size - 1);
-            var y2 = Math.Clamp(ys.Max(), 0, _size - 1);
-            for (var y = y1; y <= y2; y++)
+            RasterizePolygon(fullMask, _size, scaled, 1f);
+            var shrunk = ShrinkPolygon(scaled, _shrinkRatio, _size - 1, _size - 1);
+            RasterizePolygon(shrinkMask, _size, shrunk, 1f);
+        }
+
+        var thresholdMap = new float[_size * _size];
+        var mid = (_threshMin + _threshMax) * 0.5f;
+        for (var i = 0; i < thresholdMap.Length; i++)
+        {
+            if (shrinkMask[i] > 0.5f)
             {
-                for (var x = x1; x <= x2; x++)
-                {
-                    if (PointInPolygon(x + 0.5f, y + 0.5f, scaled))
-                    {
-                        mask[y * _size + x] = 1f;
-                    }
-                }
+                thresholdMap[i] = _threshMax;
+            }
+            else if (fullMask[i] > 0.5f)
+            {
+                thresholdMap[i] = mid;
+            }
+            else
+            {
+                thresholdMap[i] = _threshMin;
             }
         }
 
-        return (imageData, mask);
+        return (imageData, shrinkMask, thresholdMap);
+    }
+
+    private static void RasterizePolygon(float[] target, int size, int[][] poly, float value)
+    {
+        var xs = poly.Select(p => p[0]).ToArray();
+        var ys = poly.Select(p => p[1]).ToArray();
+        var x1 = Math.Clamp(xs.Min(), 0, size - 1);
+        var y1 = Math.Clamp(ys.Min(), 0, size - 1);
+        var x2 = Math.Clamp(xs.Max(), 0, size - 1);
+        var y2 = Math.Clamp(ys.Max(), 0, size - 1);
+        for (var y = y1; y <= y2; y++)
+        {
+            for (var x = x1; x <= x2; x++)
+            {
+                if (PointInPolygon(x + 0.5f, y + 0.5f, poly))
+                {
+                    target[y * size + x] = value;
+                }
+            }
+        }
+    }
+
+    private static int[][] ShrinkPolygon(int[][] poly, float ratio, int maxX, int maxY)
+    {
+        if (poly.Length < 4)
+        {
+            return poly;
+        }
+
+        var cx = (float)poly.Average(p => p[0]);
+        var cy = (float)poly.Average(p => p[1]);
+        var shrunk = poly
+            .Select(p => new[]
+            {
+                Math.Clamp((int)MathF.Round(cx + (p[0] - cx) * ratio), 0, maxX),
+                Math.Clamp((int)MathF.Round(cy + (p[1] - cy) * ratio), 0, maxY)
+            })
+            .ToArray();
+        var area = PolygonArea(shrunk);
+        return area < 1f ? poly : shrunk;
+    }
+
+    private static float PolygonArea(int[][] poly)
+    {
+        if (poly.Length < 3)
+        {
+            return 0f;
+        }
+
+        var area = 0f;
+        for (var i = 0; i < poly.Length; i++)
+        {
+            var j = (i + 1) % poly.Length;
+            area += poly[i][0] * poly[j][1] - poly[j][0] * poly[i][1];
+        }
+
+        return Math.Abs(area) * 0.5f;
     }
 
     private static bool PointInPolygon(float x, float y, int[][] poly)

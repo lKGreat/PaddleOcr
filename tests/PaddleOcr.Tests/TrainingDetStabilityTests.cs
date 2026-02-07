@@ -36,6 +36,12 @@ public sealed class TrainingDetStabilityTests
               Optimizer:
                 lr:
                   learning_rate: 0.001
+              Loss:
+                det_shrink_ratio: 0.45
+                det_thresh_min: 0.2
+                det_thresh_max: 0.8
+                det_shrink_loss_weight: 1.0
+                det_threshold_loss_weight: 0.4
               Train:
                 dataset:
                   data_dir: {{samples.Replace("\\", "/")}}

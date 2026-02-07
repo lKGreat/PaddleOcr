@@ -22,8 +22,24 @@ internal sealed class SimpleDetTrainer
     {
         SeedEverything(cfg.Seed);
         var size = cfg.DetInputSize;
-        var trainSet = new SimpleDetDataset(cfg.TrainLabelFile, cfg.DataDir, size, cfg.InvalidSamplePolicy, cfg.MinValidSamples);
-        var evalSet = new SimpleDetDataset(cfg.EvalLabelFile, cfg.EvalDataDir, size, cfg.InvalidSamplePolicy, cfg.MinValidSamples);
+        var trainSet = new SimpleDetDataset(
+            cfg.TrainLabelFile,
+            cfg.DataDir,
+            size,
+            cfg.InvalidSamplePolicy,
+            cfg.MinValidSamples,
+            cfg.DetShrinkRatio,
+            cfg.DetThreshMin,
+            cfg.DetThreshMax);
+        var evalSet = new SimpleDetDataset(
+            cfg.EvalLabelFile,
+            cfg.EvalDataDir,
+            size,
+            cfg.InvalidSamplePolicy,
+            cfg.MinValidSamples,
+            cfg.DetShrinkRatio,
+            cfg.DetThreshMin,
+            cfg.DetThreshMax);
 
         var dev = ResolveDevice(cfg);
         _logger.LogInformation("Training(det) device: {Device}", dev.type);
@@ -77,13 +93,18 @@ internal sealed class SimpleDetTrainer
             model.train();
             var lossSum = 0f;
             var samples = 0;
-            foreach (var (images, masks, batch) in trainSet.GetBatches(cfg.BatchSize, true, rng))
+            foreach (var (images, shrinkMaps, thresholdMaps, batch) in trainSet.GetBatches(cfg.BatchSize, true, rng))
             {
                 using var x = torch.tensor(images, dtype: ScalarType.Float32).reshape(batch, 3, size, size).to(dev);
-                using var y = torch.tensor(masks, dtype: ScalarType.Float32).reshape(batch, 1, size, size).to(dev);
+                using var shrinkGt = torch.tensor(shrinkMaps, dtype: ScalarType.Float32).reshape(batch, 1, size, size).to(dev);
+                using var thresholdGt = torch.tensor(thresholdMaps, dtype: ScalarType.Float32).reshape(batch, 1, size, size).to(dev);
                 optimizer.zero_grad();
                 using var pred = model.call(x);
-                using var loss = functional.binary_cross_entropy_with_logits(pred, y);
+                using var shrinkPred = pred.narrow(1, 0, 1);
+                using var thresholdPred = pred.narrow(1, 1, 1);
+                using var shrinkLoss = functional.binary_cross_entropy_with_logits(shrinkPred, shrinkGt);
+                using var thresholdLoss = functional.l1_loss(thresholdPred.sigmoid(), thresholdGt);
+                using var loss = shrinkLoss * cfg.DetShrinkLossWeight + thresholdLoss * cfg.DetThresholdLossWeight;
                 var lossValue = loss.ToSingle();
                 if (cfg.NanGuard && !IsFinite(lossValue))
                 {
@@ -186,7 +207,15 @@ internal sealed class SimpleDetTrainer
     {
         SeedEverything(cfg.Seed);
         var size = cfg.DetInputSize;
-        var evalSet = new SimpleDetDataset(cfg.EvalLabelFile, cfg.EvalDataDir, size, cfg.InvalidSamplePolicy, cfg.MinValidSamples);
+        var evalSet = new SimpleDetDataset(
+            cfg.EvalLabelFile,
+            cfg.EvalDataDir,
+            size,
+            cfg.InvalidSamplePolicy,
+            cfg.MinValidSamples,
+            cfg.DetShrinkRatio,
+            cfg.DetThreshMin,
+            cfg.DetThreshMax);
         var dev = ResolveDevice(cfg);
         using var model = new SimpleDetNet();
         model.to(dev);
@@ -217,13 +246,14 @@ internal sealed class SimpleDetTrainer
         var predSum = 0f;
         var gtSum = 0f;
         using var noGrad = torch.no_grad();
-        foreach (var (images, masks, batch) in evalSet.GetBatches(batchSize, false, evalRng))
+        foreach (var (images, shrinkMaps, _, batch) in evalSet.GetBatches(batchSize, false, evalRng))
         {
             using var x = torch.tensor(images, dtype: ScalarType.Float32).reshape(batch, 3, size, size).to(dev);
-            using var y = torch.tensor(masks, dtype: ScalarType.Float32).reshape(batch, 1, size, size).to(dev);
-            using var pred = model.call(x).sigmoid();
-            using var pb = pred.gt(0.5);
-            using var yb = y.gt(0.5);
+            using var y = torch.tensor(shrinkMaps, dtype: ScalarType.Float32).reshape(batch, 1, size, size).to(dev);
+            using var predAll = model.call(x);
+            using var pred = predAll.narrow(1, 0, 1).sigmoid();
+            using var pb = pred.gt(0.5f);
+            using var yb = y.gt(0.5f);
             using var inter = pb.logical_and(yb).sum();
             using var union = pb.logical_or(yb).sum();
             using var predArea = pb.sum();
@@ -297,6 +327,11 @@ internal sealed class SimpleDetTrainer
             cfg.BatchSize.ToString(),
             cfg.EvalBatchSize.ToString(),
             cfg.LearningRate.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            cfg.DetShrinkRatio.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            cfg.DetThreshMin.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            cfg.DetThreshMax.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            cfg.DetShrinkLossWeight.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            cfg.DetThresholdLossWeight.ToString(System.Globalization.CultureInfo.InvariantCulture),
             cfg.TrainLabelFile,
             cfg.EvalLabelFile,
             cfg.DataDir,
@@ -384,7 +419,7 @@ internal sealed class SimpleDetNet : Module<Tensor, Tensor>
             ("conv3", Conv2d(32, 32, 3, stride: 1, padding: 1)),
             ("relu3", ReLU())
         );
-        _head = Conv2d(32, 1, 1);
+        _head = Conv2d(32, 2, 1);
         RegisterComponents();
     }
 
