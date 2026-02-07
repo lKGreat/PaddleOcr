@@ -1,16 +1,18 @@
 using System.Text.Json;
+using System.Text;
 using Microsoft.Extensions.Logging;
+using PaddleOcr.Data;
+using PaddleOcr.Data.LabelEncoders;
 using PaddleOcr.Training.Rec.Losses;
 using PaddleOcr.Training.Rec.Schedulers;
 using TorchSharp;
 using static TorchSharp.torch;
-using static TorchSharp.torch.nn;
 using static TorchSharp.torch.optim;
 
 namespace PaddleOcr.Training.Rec;
 
 /// <summary>
-/// ConfigDrivenRecTrainer：配置驱动的 Rec 训练器，支持完整的模型架构、损失函数、学习率调度等。
+/// Config-driven rec trainer aligned with PaddleOCR tools training flow.
 /// </summary>
 internal sealed class ConfigDrivenRecTrainer
 {
@@ -25,41 +27,51 @@ internal sealed class ConfigDrivenRecTrainer
     {
         var shape = cfg.RecImageShape;
         var (charToId, vocab) = SimpleRecDataset.LoadDictionary(cfg.RecCharDictPath, cfg.UseSpaceChar);
-        EnsureCharsetCoverage(cfg.TrainLabelFile, cfg.EvalLabelFile, charToId, _logger);
+        var trainLabelFiles = GetLabelFilesOrFallback(cfg.TrainLabelFiles, cfg.TrainLabelFile);
+        var evalLabelFiles = GetLabelFilesOrFallback(cfg.EvalLabelFiles, cfg.EvalLabelFile);
+        EnsureCharsetCoverage(trainLabelFiles, evalLabelFiles, charToId, _logger);
 
-        var useMultiScale = cfg.UseMultiScale;
-        SimpleRecDataset? trainSet = null;
-        MultiScaleRecDataset? trainSetMs = null;
-        if (useMultiScale)
-        {
-            trainSetMs = new MultiScaleRecDataset(cfg.TrainLabelFile, cfg.DataDir, shape.H, cfg.MultiScaleWidths, cfg.MaxTextLength, charToId, enableAugmentation: true);
-            _logger.LogInformation("Using MultiScaleDataSet with widths: [{Widths}]", string.Join(", ", cfg.MultiScaleWidths));
-        }
-        else
-        {
-            trainSet = new SimpleRecDataset(cfg.TrainLabelFile, cfg.DataDir, shape.H, shape.W, cfg.MaxTextLength, charToId, enableAugmentation: true);
-        }
-        var trainCount = useMultiScale ? trainSetMs!.Count : trainSet!.Count;
-        var evalSet = new SimpleRecDataset(cfg.EvalLabelFile, cfg.EvalDataDir, shape.H, shape.W, cfg.MaxTextLength, charToId);
+        var gtcEncodeType = ResolveGtcEncodeType(cfg);
+        var ctcEncoder = new CTCLabelEncode(cfg.MaxTextLength, cfg.RecCharDictPath, cfg.UseSpaceChar);
+        var gtcEncoder = CreateGtcEncoder(gtcEncodeType, cfg);
+        var resizeStrategy = RecTrainingResizeFactory.Create(cfg.GetArchitectureString("algorithm", "SVTR_LCNet"));
+
+        var trainSet = new ConfigRecDataset(
+            trainLabelFiles,
+            cfg.DataDir,
+            shape.H,
+            shape.W,
+            cfg.MaxTextLength,
+            ctcEncoder,
+            gtcEncoder,
+            resizeStrategy,
+            enableAugmentation: true,
+            useMultiScale: cfg.UseMultiScale,
+            multiScaleWidths: cfg.MultiScaleWidths);
+
+        var evalSet = new ConfigRecDataset(
+            evalLabelFiles,
+            cfg.EvalDataDir,
+            shape.H,
+            shape.W,
+            cfg.MaxTextLength,
+            ctcEncoder,
+            gtcEncoder,
+            resizeStrategy,
+            enableAugmentation: false,
+            useMultiScale: false);
 
         var dev = ResolveDevice(cfg);
         _logger.LogInformation("Training(rec) device: {Device}", dev.type);
-        _logger.LogInformation("Train samples: {TrainCount}, Eval samples: {EvalCount}, Vocab: {Vocab}", trainCount, evalSet.Count, vocab.Count);
+        _logger.LogInformation("Train samples: {TrainCount}, Eval samples: {EvalCount}, Vocab: {Vocab}", trainSet.Count, evalSet.Count, vocab.Count);
 
-        // 从配置构建模型
-        var model = BuildModel(cfg, vocab.Count + 1);
+        var model = BuildModel(cfg, vocab.Count + 1, gtcEncodeType);
         model.to(dev);
 
-        // 从配置构建优化器
         var optimizer = BuildOptimizer(cfg, model);
-
-        // 从配置构建学习率调度器
         var lrScheduler = BuildLRScheduler(cfg);
-
-        // 从配置构建损失函数
         var lossFn = BuildLoss(cfg);
 
-        // 训练辅助工具
         var ckptManager = new CheckpointManager(_logger);
         var ampHelper = cfg.Device.Contains("cuda", StringComparison.OrdinalIgnoreCase) ? new AmpTrainingHelper(dev) : null;
         var modelAverager = new ModelAverager();
@@ -73,7 +85,6 @@ internal sealed class ConfigDrivenRecTrainer
         var globalStep = 0;
         var startEpoch = 1;
 
-        // 加载 checkpoint（完整恢复：模型 + 优化器 + 调度器 + 元信息）
         if (cfg.ResumeTraining)
         {
             var meta = ckptManager.LoadFull(cfg.SaveModelDir, "latest", model, optimizer, lrScheduler);
@@ -82,12 +93,10 @@ internal sealed class ConfigDrivenRecTrainer
                 startEpoch = meta.Epoch + 1;
                 globalStep = meta.GlobalStep;
                 bestAcc = meta.BestAcc;
-                _logger.LogInformation("Resumed training from epoch {Epoch}, step {Step}, best_acc {Acc:F4}",
-                    startEpoch, globalStep, bestAcc);
+                _logger.LogInformation("Resumed training from epoch {Epoch}, step {Step}, best_acc {Acc:F4}", startEpoch, globalStep, bestAcc);
             }
             else
             {
-                // 兼容旧 checkpoint 格式（仅模型）
                 var resumeCkpt = ResolveEvalCheckpoint(cfg);
                 if (!string.IsNullOrWhiteSpace(resumeCkpt))
                 {
@@ -101,92 +110,102 @@ internal sealed class ConfigDrivenRecTrainer
         for (var epoch = startEpoch; epoch <= cfg.EpochNum; epoch++)
         {
             model.train();
+            optimizer.zero_grad();
             var lossSum = 0f;
             var sampleCount = 0;
 
-            // 统一的 batch 迭代：支持 SimpleRecDataset 和 MultiScaleRecDataset
-            IEnumerable<(float[] Images, long[] Labels, int Batch, int Width)> batchIter;
-            if (useMultiScale)
+            foreach (var batchData in trainSet.GetBatches(cfg.BatchSize, shuffle: true, rng))
             {
-                batchIter = trainSetMs!.GetBatches(cfg.BatchSize, shuffle: true, rng)
-                    .Select(b => (b.Images, b.Labels, b.Batch, b.Width));
-            }
-            else
-            {
-                batchIter = trainSet!.GetBatches(cfg.BatchSize, shuffle: true, rng)
-                    .Select(b => (b.Images, b.Labels, b.Batch, shape.W));
-            }
+                using var x = torch.tensor(batchData.Images, dtype: ScalarType.Float32).reshape(batchData.Batch, 3, shape.H, batchData.Width).to(dev);
+                using var yCtc = torch.tensor(batchData.LabelCtc, dtype: ScalarType.Int64).reshape(batchData.Batch, cfg.MaxTextLength).to(dev);
+                using var yGtc = torch.tensor(batchData.LabelGtc, dtype: ScalarType.Int64).reshape(batchData.Batch, cfg.MaxTextLength).to(dev);
+                using var targetLengths = torch.tensor(batchData.Lengths.Select(x => (long)x).ToArray(), dtype: ScalarType.Int64).to(dev);
+                using var validRatio = torch.tensor(batchData.ValidRatios, dtype: ScalarType.Float32).to(dev);
 
-            foreach (var (images, labels, batch, batchW) in batchIter)
-            {
-                using var x = torch.tensor(images, dtype: ScalarType.Float32).reshape(batch, 3, shape.H, batchW).to(dev);
-                using var y = torch.tensor(labels, dtype: ScalarType.Int64).reshape(batch, cfg.MaxTextLength).to(dev);
-
-                optimizer.zero_grad();
-
-                // 混合精度前向传播
                 using var autocast = ampHelper?.Autocast();
-                var predictions = model.ForwardDict(x, new Dictionary<string, Tensor> { ["label"] = y });
-                var batchDict = new Dictionary<string, Tensor> { ["label"] = y };
-                var lossDict = lossFn.Forward(predictions, batchDict);
-                var loss = lossDict["loss"];
+                var predictions = model.ForwardDict(
+                    x,
+                    new Dictionary<string, Tensor>
+                    {
+                        ["label"] = yCtc,
+                        ["label_ctc"] = yCtc,
+                        ["label_gtc"] = yGtc,
+                        ["valid_ratio"] = validRatio
+                    });
 
-                // NaN/Inf 守卫：检查 loss 是否有效
+                var ctcLogits = predictions.TryGetValue("ctc", out var ctcValue)
+                    ? ctcValue
+                    : (predictions.TryGetValue("predict", out var predValue) ? predValue : predictions.Values.First());
+                var ctcTime = ctcLogits.shape.Length >= 2 ? ctcLogits.shape[1] : cfg.MaxTextLength;
+                using var inputLengths = torch.full(new long[] { batchData.Batch }, ctcTime, dtype: ScalarType.Int64, device: dev);
+
+                var lossDict = lossFn.Forward(
+                    predictions,
+                    new Dictionary<string, Tensor>
+                    {
+                        ["label"] = yCtc,
+                        ["label_ctc"] = yCtc,
+                        ["label_gtc"] = yGtc,
+                        ["target_lengths"] = targetLengths,
+                        ["input_lengths"] = inputLengths,
+                        ["length"] = targetLengths,
+                        ["valid_ratio"] = validRatio
+                    });
+
+                var loss = lossDict["loss"];
                 var lossVal = loss.ToSingle();
                 if (float.IsNaN(lossVal) || float.IsInfinity(lossVal))
                 {
                     _logger.LogWarning("NaN/Inf loss detected at step {Step}, skipping this batch", globalStep);
                     globalStep++;
-                    foreach (var t in predictions.Values) t.Dispose();
-                    foreach (var t in lossDict.Values) t.Dispose();
+                    DisposeTensorDictionary(predictions);
+                    DisposeTensorDictionary(lossDict);
                     continue;
                 }
 
-                // AMP: 缩放 loss 防止 float16 梯度下溢
                 var scaledLoss = ampHelper is not null ? ampHelper.ScaleLoss(loss) : loss;
                 scaledLoss.backward();
-                if (!ReferenceEquals(scaledLoss, loss)) scaledLoss.Dispose();
+                if (!ReferenceEquals(scaledLoss, loss))
+                {
+                    scaledLoss.Dispose();
+                }
 
-                // AMP: 反缩放梯度并检查 inf/nan
                 var gradsOk = ampHelper?.UnscaleAndCheck(model) ?? true;
-
-                // 梯度裁剪
                 if (gradsOk && cfg.GradClipNorm > 0f)
                 {
                     GradientUtils.ClipGradNorm(model, cfg.GradClipNorm);
                 }
 
-                // 梯度累积 + 优化器更新
-                if (gradsOk && gradAccumulator.ShouldUpdate())
+                var shouldUpdate = gradAccumulator.ShouldUpdate();
+                if (gradsOk && shouldUpdate)
                 {
                     optimizer.step();
                     optimizer.zero_grad();
                 }
 
-                // AMP: 更新 scaler 状态
                 ampHelper?.Update();
 
-                lossSum += lossVal * batch;
-                sampleCount += batch;
+                lossSum += lossVal * batchData.Batch;
+                sampleCount += batchData.Batch;
                 globalStep++;
 
-                // 更新学习率（仅在梯度更新时）
-                if (gradAccumulator.ShouldUpdate() || globalStep == 1)
+                if (shouldUpdate || globalStep == 1)
                 {
                     lrScheduler.Step(globalStep, epoch);
-                    // 通过 param_groups 更新优化器学习率
                     ApplyLearningRate(optimizer, lrScheduler.CurrentLR);
                 }
+
+                DisposeTensorDictionary(predictions);
+                DisposeTensorDictionary(lossDict);
             }
 
-            // 模型平均（用于 SRN 等）
             if (ShouldUseModelAveraging(cfg))
             {
                 modelAverager.Update(model);
             }
 
             var trainLoss = sampleCount == 0 ? 0f : lossSum / sampleCount;
-            var evalMetrics = Evaluate(model, evalSet, cfg.EvalBatchSize, shape.H, shape.W, cfg.MaxTextLength, dev, vocab);
+            var evalMetrics = Evaluate(model, evalSet, cfg.EvalBatchSize, shape.H, cfg.MaxTextLength, dev, vocab);
 
             if (evalMetrics.Accuracy > bestAcc + cfg.MinImproveDelta)
             {
@@ -202,7 +221,13 @@ internal sealed class ConfigDrivenRecTrainer
             ckptManager.SaveFull(cfg.SaveModelDir, "latest", model, optimizer, lrScheduler, epoch, globalStep, bestAcc);
             _logger.LogInformation(
                 "epoch={Epoch}/{Total} train_loss={Loss:F4} eval_acc={EvalAcc:F4} eval_char_acc={CharAcc:F4} eval_edit={Edit:F4} lr={Lr:F6}",
-                epoch, cfg.EpochNum, trainLoss, evalMetrics.Accuracy, evalMetrics.CharacterAccuracy, evalMetrics.AvgEditDistance, lrScheduler.CurrentLR);
+                epoch,
+                cfg.EpochNum,
+                trainLoss,
+                evalMetrics.Accuracy,
+                evalMetrics.CharacterAccuracy,
+                evalMetrics.AvgEditDistance,
+                lrScheduler.CurrentLR);
 
             epochsCompleted = epoch;
 
@@ -214,7 +239,6 @@ internal sealed class ConfigDrivenRecTrainer
             }
         }
 
-        // 应用模型平均
         if (ShouldUseModelAveraging(cfg))
         {
             modelAverager.Apply(model);
@@ -224,6 +248,7 @@ internal sealed class ConfigDrivenRecTrainer
         ampHelper?.Dispose();
         optimizer.Dispose();
         model.Dispose();
+
         var summary = new TrainingSummary(epochsCompleted, bestAcc, cfg.SaveModelDir);
         SaveSummary(cfg, summary, earlyStopped, cfg.ResumeTraining ? cfg.SaveModelDir : null);
         return summary;
@@ -232,11 +257,25 @@ internal sealed class ConfigDrivenRecTrainer
     public EvaluationSummary Eval(TrainingConfigView cfg)
     {
         var shape = cfg.RecImageShape;
-        var (charToId, vocab) = SimpleRecDataset.LoadDictionary(cfg.RecCharDictPath, cfg.UseSpaceChar);
-        var evalSet = new SimpleRecDataset(cfg.EvalLabelFile, cfg.EvalDataDir, shape.H, shape.W, cfg.MaxTextLength, charToId);
+        var (_, vocab) = SimpleRecDataset.LoadDictionary(cfg.RecCharDictPath, cfg.UseSpaceChar);
+        var gtcEncodeType = ResolveGtcEncodeType(cfg);
+        var ctcEncoder = new CTCLabelEncode(cfg.MaxTextLength, cfg.RecCharDictPath, cfg.UseSpaceChar);
+        var gtcEncoder = CreateGtcEncoder(gtcEncodeType, cfg);
+        var resizeStrategy = RecTrainingResizeFactory.Create(cfg.GetArchitectureString("algorithm", "SVTR_LCNet"));
+
+        var evalSet = new ConfigRecDataset(
+            GetLabelFilesOrFallback(cfg.EvalLabelFiles, cfg.EvalLabelFile),
+            cfg.EvalDataDir,
+            shape.H,
+            shape.W,
+            cfg.MaxTextLength,
+            ctcEncoder,
+            gtcEncoder,
+            resizeStrategy,
+            enableAugmentation: false);
 
         var dev = ResolveDevice(cfg);
-        var model = BuildModel(cfg, vocab.Count + 1);
+        var model = BuildModel(cfg, vocab.Count + 1, gtcEncodeType);
         model.to(dev);
 
         var ckpt = ResolveEvalCheckpoint(cfg);
@@ -245,7 +284,7 @@ internal sealed class ConfigDrivenRecTrainer
             TryLoadCheckpoint(model, ckpt);
         }
 
-        var metrics = Evaluate(model, evalSet, cfg.EvalBatchSize, shape.H, shape.W, cfg.MaxTextLength, dev, vocab);
+        var metrics = Evaluate(model, evalSet, cfg.EvalBatchSize, shape.H, cfg.MaxTextLength, dev, vocab);
         model.Dispose();
 
         var summary = new EvaluationSummary(metrics.Accuracy, evalSet.Count);
@@ -255,23 +294,54 @@ internal sealed class ConfigDrivenRecTrainer
             JsonSerializer.Serialize(metrics, new JsonSerializerOptions { WriteIndented = true }));
         _logger.LogInformation(
             "rec eval_acc={EvalAcc:F4} char_acc={CharAcc:F4} avg_edit={Edit:F4} samples={Samples}",
-            metrics.Accuracy, metrics.CharacterAccuracy, metrics.AvgEditDistance, summary.Samples);
+            metrics.Accuracy,
+            metrics.CharacterAccuracy,
+            metrics.AvgEditDistance,
+            summary.Samples);
         return summary;
     }
 
-    private RecModel BuildModel(TrainingConfigView cfg, int numClasses)
+    private RecModel BuildModel(TrainingConfigView cfg, int numClasses, string? gtcEncodeType)
     {
         var backboneName = cfg.GetArchitectureString("Backbone.name", "MobileNetV1Enhance");
+        var resolvedBackboneName = ResolveBackboneAlias(backboneName);
         var neckName = cfg.GetArchitectureString("Neck.name", "SequenceEncoder");
+        var neckEncoderType = ResolveNeckEncoderType(cfg);
         var headName = cfg.GetArchitectureString("Head.name", "CTCHead");
         var hiddenSize = cfg.GetArchitectureInt("Head.hidden_size", 48);
+        hiddenSize = ResolveGtcHiddenSize(cfg, hiddenSize);
         var maxLen = cfg.MaxTextLength;
         var inChannels = cfg.GetArchitectureInt("in_channels", 3);
 
-        _logger.LogInformation("Building model: backbone={Backbone}, neck={Neck}, head={Head}, num_classes={Classes}, hidden_size={Hidden}, max_len={MaxLen}",
-            backboneName, neckName, headName, numClasses, hiddenSize, maxLen);
+        var gtcHeadName = ResolveGtcHeadName(cfg);
+        var gtcOutChannels = ResolveGtcOutChannels(numClasses, gtcHeadName, gtcEncodeType);
 
-        return RecModelBuilder.Build(backboneName, neckName, headName, numClasses, inChannels, hiddenSize, maxLen);
+        _logger.LogInformation(
+                "Building model: backbone={Backbone}, neck={Neck}({NeckEncoder}), head={Head}, num_classes={Classes}, gtc_head={GtcHead}, gtc_classes={GtcClasses}",
+                resolvedBackboneName,
+                neckName,
+                neckEncoderType,
+                headName,
+                numClasses,
+                gtcHeadName ?? "none",
+                gtcOutChannels);
+
+        if (!string.Equals(backboneName, resolvedBackboneName, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning("Backbone '{Backbone}' is not implemented, using compatible fallback '{Fallback}'", backboneName, resolvedBackboneName);
+        }
+
+        return RecModelBuilder.Build(
+            resolvedBackboneName,
+            neckName,
+            headName,
+            numClasses,
+            inChannels,
+            hiddenSize,
+            maxLen,
+            neckEncoderType,
+            gtcHeadName,
+            gtcOutChannels);
     }
 
     private Optimizer BuildOptimizer(TrainingConfigView cfg, RecModel model)
@@ -281,6 +351,10 @@ internal sealed class ConfigDrivenRecTrainer
         var beta1 = cfg.GetOptimizerFloat("beta1", 0.9f);
         var beta2 = cfg.GetOptimizerFloat("beta2", 0.999f);
         var weightDecay = cfg.GetOptimizerFloat("weight_decay", 0f);
+        if (weightDecay <= 0f)
+        {
+            weightDecay = cfg.GetOptimizerFloat("regularizer.factor", 0f);
+        }
 
         return optName.ToLowerInvariant() switch
         {
@@ -294,8 +368,26 @@ internal sealed class ConfigDrivenRecTrainer
     private ILRScheduler BuildLRScheduler(TrainingConfigView cfg)
     {
         var lrConfig = cfg.GetOptimizerLrConfig();
-        var lrName = lrConfig.TryGetValue("name", out var name) ? name.ToString() ?? "Cosine" : "Cosine";
-        var baseLr = cfg.LearningRate;
+        var lrName = lrConfig.TryGetValue("name", out var rawName) ? rawName?.ToString() ?? "Cosine" : "Cosine";
+        if (!lrConfig.ContainsKey("initial_lr"))
+        {
+            lrConfig["initial_lr"] = cfg.LearningRate;
+        }
+
+        if (!lrConfig.ContainsKey("learning_rate"))
+        {
+            lrConfig["learning_rate"] = cfg.LearningRate;
+        }
+
+        if (!lrConfig.ContainsKey("max_epochs"))
+        {
+            lrConfig["max_epochs"] = cfg.EpochNum;
+        }
+
+        if (lrConfig.TryGetValue("warmup_epoch", out var warmupEpoch) && !lrConfig.ContainsKey("warmup_epochs"))
+        {
+            lrConfig["warmup_epochs"] = warmupEpoch ?? 0;
+        }
 
         return LRSchedulerBuilder.Build(lrName, lrConfig);
     }
@@ -307,7 +399,14 @@ internal sealed class ConfigDrivenRecTrainer
         return RecLossBuilder.Build(lossName, lossConfig);
     }
 
-    private static RecEvalMetrics Evaluate(RecModel model, SimpleRecDataset evalSet, int batchSize, int h, int w, int maxTextLength, Device dev, IReadOnlyList<char> vocab)
+    private static RecEvalMetrics Evaluate(
+        RecModel model,
+        ConfigRecDataset evalSet,
+        int batchSize,
+        int h,
+        int maxTextLength,
+        Device dev,
+        IReadOnlyList<char> vocab)
     {
         model.eval();
         long correct = 0;
@@ -316,34 +415,39 @@ internal sealed class ConfigDrivenRecTrainer
         var charErrors = 0L;
         var editSum = 0L;
         using var noGrad = torch.no_grad();
-        foreach (var (images, labels, batch) in evalSet.GetBatches(batchSize, shuffle: false, new Random(7)))
+        foreach (var batchData in evalSet.GetBatches(batchSize, shuffle: false, new Random(7)))
         {
-            using var x = torch.tensor(images, dtype: ScalarType.Float32).reshape(batch, 3, h, w).to(dev);
-            using var y = torch.tensor(labels, dtype: ScalarType.Int64).reshape(batch, maxTextLength).to(dev);
+            using var x = torch.tensor(batchData.Images, dtype: ScalarType.Float32).reshape(batchData.Batch, 3, h, batchData.Width).to(dev);
+            using var y = torch.tensor(batchData.LabelCtc, dtype: ScalarType.Int64).reshape(batchData.Batch, maxTextLength).to(dev);
             var predictions = model.ForwardDict(x);
-            var logits = predictions.ContainsKey("predict") ? predictions["predict"] : predictions.Values.First();
+            var logits = predictions.TryGetValue("ctc", out var ctcValue)
+                ? ctcValue
+                : (predictions.TryGetValue("predict", out var predValue) ? predValue : predictions.Values.First());
 
             using var pred = logits.argmax(2).to_type(ScalarType.Int64).cpu();
             using var gt = y.cpu();
 
             var predFlat = pred.data<long>().ToArray();
             var gtFlat = gt.data<long>().ToArray();
-            for (var i = 0; i < batch; i++)
+            for (var i = 0; i < batchData.Batch; i++)
             {
                 var predSeq = predFlat.Skip(i * maxTextLength).Take(maxTextLength).ToArray();
                 var gtSeq = gtFlat.Skip(i * maxTextLength).Take(maxTextLength).ToArray();
-                var predText = SimpleRecDataset.Decode(predSeq, vocab);
+                var predText = DecodeCtcPrediction(predSeq, vocab);
                 var gtText = SimpleRecDataset.Decode(gtSeq, vocab);
                 if (string.Equals(predText, gtText, StringComparison.Ordinal))
                 {
                     correct++;
                 }
+
                 var edit = Levenshtein(predText, gtText);
                 editSum += edit;
                 charErrors += edit;
                 charTotal += gtText.Length;
                 total++;
             }
+
+            DisposeTensorDictionary(predictions);
         }
 
         var acc = total == 0 ? 0f : (float)correct / total;
@@ -388,18 +492,37 @@ internal sealed class ConfigDrivenRecTrainer
         return prev[right.Length];
     }
 
-    private void SaveCheckpoint(string saveDir, RecModel model, string fileName)
+    private static string DecodeCtcPrediction(long[] ids, IReadOnlyList<char> vocab)
     {
-        Directory.CreateDirectory(saveDir);
-        var path = Path.Combine(saveDir, fileName);
-        try
+        if (ids.Length == 0)
         {
-            model.save(path);
+            return string.Empty;
         }
-        catch (Exception ex)
+
+        var sb = new StringBuilder(ids.Length);
+        long prev = 0;
+        foreach (var id in ids)
         {
-            _logger.LogWarning(ex, "Failed to save torch checkpoint {Path}", path);
+            if (id <= 0)
+            {
+                prev = 0;
+                continue;
+            }
+
+            if (id == prev)
+            {
+                continue;
+            }
+
+            if (id <= vocab.Count)
+            {
+                sb.Append(vocab[(int)id - 1]);
+            }
+
+            prev = id;
         }
+
+        return sb.ToString();
     }
 
     private void TryLoadCheckpoint(RecModel model, string checkpointPath)
@@ -463,10 +586,10 @@ internal sealed class ConfigDrivenRecTrainer
             JsonSerializer.Serialize(run, new JsonSerializerOptions { WriteIndented = true }));
     }
 
-    private static void EnsureCharsetCoverage(string trainLabelFile, string evalLabelFile, IReadOnlyDictionary<char, int> charToId, ILogger logger)
+    private static void EnsureCharsetCoverage(IReadOnlyList<string> trainLabelFiles, IReadOnlyList<string> evalLabelFiles, IReadOnlyDictionary<char, int> charToId, ILogger logger)
     {
         var missing = new HashSet<char>();
-        foreach (var labelFile in new[] { trainLabelFile, evalLabelFile })
+        foreach (var labelFile in trainLabelFiles.Concat(evalLabelFiles))
         {
             if (!File.Exists(labelFile))
             {
@@ -513,9 +636,6 @@ internal sealed class ConfigDrivenRecTrainer
         return cuda.is_available() ? CUDA : CPU;
     }
 
-    /// <summary>
-    /// 通过 TorchSharp 优化器的 param_groups 更新学习率。
-    /// </summary>
     private static void ApplyLearningRate(Optimizer optimizer, double lr)
     {
         foreach (var pg in optimizer.ParamGroups)
@@ -526,13 +646,180 @@ internal sealed class ConfigDrivenRecTrainer
 
     private static int GetGradAccumulationSteps(TrainingConfigView cfg)
     {
-        // 从配置读取梯度累积步数，默认 1
         return cfg.GetConfigInt("Optimizer.grad_accumulation_steps", 1);
     }
 
     private static bool ShouldUseModelAveraging(TrainingConfigView cfg)
     {
-        // 从配置读取是否使用模型平均，默认 false
         return cfg.GetConfigBool("Global.use_model_averaging", false);
+    }
+
+    private static IReadOnlyList<string> GetLabelFilesOrFallback(IReadOnlyList<string> labelFiles, string fallback)
+    {
+        if (labelFiles.Count > 0)
+        {
+            return labelFiles;
+        }
+
+        return string.IsNullOrWhiteSpace(fallback) ? [] : [fallback];
+    }
+
+    private static string? ResolveGtcEncodeType(TrainingConfigView cfg)
+    {
+        var transforms = cfg.GetByPathPublic("Train.dataset.transforms");
+        if (transforms is not IList<object?> list)
+        {
+            return null;
+        }
+
+        foreach (var item in list)
+        {
+            if (item is not Dictionary<string, object?> op || !op.TryGetValue("MultiLabelEncode", out var cfgObj))
+            {
+                continue;
+            }
+
+            if (cfgObj is Dictionary<string, object?> opCfg &&
+                opCfg.TryGetValue("gtc_encode", out var gtcEncode) &&
+                !string.IsNullOrWhiteSpace(gtcEncode?.ToString()))
+            {
+                return gtcEncode!.ToString();
+            }
+        }
+
+        return null;
+    }
+
+    private static IRecLabelEncoder? CreateGtcEncoder(string? gtcEncodeType, TrainingConfigView cfg)
+    {
+        if (string.IsNullOrWhiteSpace(gtcEncodeType))
+        {
+            return null;
+        }
+
+        return gtcEncodeType switch
+        {
+            "NRTRLabelEncode" => new NRTRLabelEncode(cfg.MaxTextLength, cfg.RecCharDictPath, cfg.UseSpaceChar),
+            "SARLabelEncode" => new SARLabelEncode(cfg.MaxTextLength, cfg.RecCharDictPath, cfg.UseSpaceChar),
+            "AttnLabelEncode" => new AttnLabelEncode(cfg.MaxTextLength, cfg.RecCharDictPath, cfg.UseSpaceChar),
+            _ => null
+        };
+    }
+
+    private static string? ResolveGtcHeadName(TrainingConfigView cfg)
+    {
+        var raw = cfg.GetByPathPublic("Architecture.Head.head_list");
+        if (raw is not IList<object?> list || list.Count < 2)
+        {
+            return null;
+        }
+
+        var second = list[1];
+        if (second is not Dictionary<string, object?> headDict || headDict.Count == 0)
+        {
+            return null;
+        }
+
+        return headDict.Keys.FirstOrDefault();
+    }
+
+    private static string ResolveNeckEncoderType(TrainingConfigView cfg)
+    {
+        var direct = cfg.GetArchitectureString("Neck.encoder_type", string.Empty);
+        if (!string.IsNullOrWhiteSpace(direct))
+        {
+            return direct;
+        }
+
+        var raw = cfg.GetByPathPublic("Architecture.Head.head_list");
+        if (raw is not IList<object?> list || list.Count == 0)
+        {
+            return "reshape";
+        }
+
+        if (list[0] is not Dictionary<string, object?> firstHead || !firstHead.TryGetValue("CTCHead", out var ctcCfgRaw))
+        {
+            return "reshape";
+        }
+
+        if (ctcCfgRaw is not Dictionary<string, object?> ctcCfg || !ctcCfg.TryGetValue("Neck", out var neckCfgRaw))
+        {
+            return "reshape";
+        }
+
+        if (neckCfgRaw is not Dictionary<string, object?> neckCfg || !neckCfg.TryGetValue("name", out var neckNameRaw))
+        {
+            return "reshape";
+        }
+
+        var fromHead = neckNameRaw?.ToString();
+        return string.IsNullOrWhiteSpace(fromHead) ? "reshape" : fromHead;
+    }
+
+    private static int ResolveGtcHiddenSize(TrainingConfigView cfg, int fallback)
+    {
+        var raw = cfg.GetByPathPublic("Architecture.Head.head_list");
+        if (raw is not IList<object?> list || list.Count < 2)
+        {
+            return fallback;
+        }
+
+        var second = list[1];
+        if (second is not Dictionary<string, object?> headDict || headDict.Count == 0)
+        {
+            return fallback;
+        }
+
+        var headKv = headDict.First();
+        if (headKv.Value is not Dictionary<string, object?> headCfg)
+        {
+            return fallback;
+        }
+
+        var key = headKv.Key;
+        if (key.Contains("NRTR", StringComparison.OrdinalIgnoreCase) &&
+            headCfg.TryGetValue("nrtr_dim", out var nrtrDimRaw) &&
+            int.TryParse(nrtrDimRaw?.ToString(), out var nrtrDim) &&
+            nrtrDim > 0)
+        {
+            return nrtrDim;
+        }
+
+        return fallback;
+    }
+
+    private static string ResolveBackboneAlias(string backboneName)
+    {
+        return backboneName.ToLowerInvariant() switch
+        {
+            "pphgnetv2" => "PPHGNetV2_B4",
+            _ => backboneName
+        };
+    }
+
+    private static int ResolveGtcOutChannels(int ctcOutChannels, string? gtcHeadName, string? gtcEncodeType)
+    {
+        var normalized = (gtcHeadName ?? string.Empty).ToLowerInvariant();
+        var encode = gtcEncodeType ?? string.Empty;
+
+        if (normalized.Contains("nrtr", StringComparison.OrdinalIgnoreCase) || encode.Equals("NRTRLabelEncode", StringComparison.OrdinalIgnoreCase))
+        {
+            return ctcOutChannels + 3;
+        }
+
+        if (normalized.Contains("sar", StringComparison.OrdinalIgnoreCase) || encode.Equals("SARLabelEncode", StringComparison.OrdinalIgnoreCase))
+        {
+            return ctcOutChannels + 2;
+        }
+
+        return ctcOutChannels;
+    }
+
+    private static void DisposeTensorDictionary(Dictionary<string, Tensor> tensors)
+    {
+        foreach (var tensor in tensors.Values)
+        {
+            tensor.Dispose();
+        }
     }
 }

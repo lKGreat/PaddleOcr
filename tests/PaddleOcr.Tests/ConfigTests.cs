@@ -42,6 +42,37 @@ public sealed class ConfigTests
     }
 
     [Fact]
+    public void ConfigMerger_Should_Merge_List_Index_Path()
+    {
+        var cfg = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["Train"] = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["dataset"] = new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    ["label_file_list"] = new List<object?> { "a.txt" }
+                }
+            }
+        };
+
+        ConfigMerger.MergeInPlace(cfg, new Dictionary<string, object?>
+        {
+            ["Train.dataset.label_file_list[0]"] = "train.txt",
+            ["Eval.dataset.label_file_list[0]"] = "eval.txt"
+        });
+
+        var train = (IDictionary<string, object?>)cfg["Train"]!;
+        var trainDataset = (IDictionary<string, object?>)train["dataset"]!;
+        var trainList = (System.Collections.IList)trainDataset["label_file_list"]!;
+        trainList[0].Should().Be("train.txt");
+
+        var eval = (IDictionary<string, object?>)cfg["Eval"]!;
+        var evalDataset = (IDictionary<string, object?>)eval["dataset"]!;
+        var evalList = (System.Collections.IList)evalDataset["label_file_list"]!;
+        evalList[0].Should().Be("eval.txt");
+    }
+
+    [Fact]
     public void ConfigValidator_Diff_Should_Report_Changed_Field()
     {
         var a = new Dictionary<string, object?>

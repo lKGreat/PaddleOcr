@@ -32,6 +32,8 @@ public static class RecModelBuilder
             "resnet152_vd" => BuildResNetVd(inChannels, 152),
             "resnet200_vd" => BuildResNetVd(inChannels, 200),
             "pphgnet_small" or "pphgnetsmall" => BuildPPHGNetSmall(inChannels),
+            "pphgnetv2_b4" or "pphgnetv2b4" => BuildPPHGNetV2B4(inChannels),
+            "pphgnetv2" => BuildPPHGNetV2B4(inChannels),
             "resnet31" => BuildResNet31(inChannels),
             "resnet32" => BuildResNet32(inChannels),
             "resnet45" => BuildResNet45(inChannels),
@@ -51,9 +53,20 @@ public static class RecModelBuilder
     /// 构建 neck。
     /// </summary>
     public static (Module<Tensor, Tensor> Module, int OutChannels) BuildNeck(
-        string name, int inChannels, int hiddenSize = 48)
+        string name, int inChannels, int hiddenSize = 48, string? encoderType = null)
     {
-        var encoder = new SequenceEncoder(inChannels, name.ToLowerInvariant(), hiddenSize);
+        var normalizedName = name.ToLowerInvariant();
+        var normalizedEncoderType = (encoderType ?? string.Empty).ToLowerInvariant();
+        if (normalizedName is "sequenceencoder" or "sequence_encoder" or "neck")
+        {
+            normalizedName = string.IsNullOrWhiteSpace(normalizedEncoderType) ? "reshape" : normalizedEncoderType;
+        }
+        else if (!string.IsNullOrWhiteSpace(normalizedEncoderType))
+        {
+            normalizedName = normalizedEncoderType;
+        }
+
+        var encoder = new SequenceEncoder(inChannels, normalizedName, hiddenSize);
         return (encoder, encoder.OutChannels);
     }
 
@@ -61,13 +74,19 @@ public static class RecModelBuilder
     /// 构建 head。
     /// </summary>
     public static Module<Tensor, Tensor> BuildHead(
-        string name, int inChannels, int outChannels, int hiddenSize = 48, int maxLen = 25)
+        string name,
+        int inChannels,
+        int outChannels,
+        int hiddenSize = 48,
+        int maxLen = 25,
+        string? gtcHeadName = null,
+        int gtcOutChannels = 0)
     {
         return name.ToLowerInvariant() switch
         {
             "ctc" or "ctchead" => new CTCHead(inChannels, outChannels),
             "attn" or "attention" or "attentionhead" => new AttentionHead(inChannels, outChannels, hiddenSize, maxLen),
-            "multi" or "multihead" => new MultiHead(inChannels, outChannels, outChannels, hiddenSize),
+            "multi" or "multihead" => new MultiHead(inChannels, outChannels, gtcOutChannels, hiddenSize, maxLen, gtcHeadName),
             "sar" or "sarhead" => new SARHead(inChannels, outChannels, hiddenSize, maxLen),
             "nrtr" or "nrtrhead" => new NRTRHead(inChannels, outChannels, hiddenSize, maxLen: maxLen),
             "srn" or "srnhead" => new SRNHead(inChannels, outChannels, hiddenSize, maxLen),
@@ -98,11 +117,14 @@ public static class RecModelBuilder
         int numClasses,
         int inChannels = 3,
         int hiddenSize = 48,
-        int maxLen = 25)
+        int maxLen = 25,
+        string? neckEncoderType = null,
+        string? gtcHeadName = null,
+        int gtcOutChannels = 0)
     {
         var (backbone, backboneOutCh) = BuildBackbone(backboneName, inChannels);
-        var (neck, neckOutCh) = BuildNeck(neckName, backboneOutCh, hiddenSize);
-        var head = BuildHead(headName, neckOutCh, numClasses, hiddenSize, maxLen);
+        var (neck, neckOutCh) = BuildNeck(neckName, backboneOutCh, hiddenSize, neckEncoderType);
+        var head = BuildHead(headName, neckOutCh, numClasses, hiddenSize, maxLen, gtcHeadName, gtcOutChannels);
         return new RecModel(backbone, neck, head, backboneName, neckName, headName);
     }
 
@@ -115,6 +137,12 @@ public static class RecModelBuilder
     private static (Module<Tensor, Tensor>, int) BuildPPHGNetSmall(int inChannels)
     {
         var m = new PPHGNetSmall(inChannels);
+        return (m, m.OutChannels);
+    }
+
+    private static (Module<Tensor, Tensor>, int) BuildPPHGNetV2B4(int inChannels)
+    {
+        var m = new PPHGNetV2B4(inChannels);
         return (m, m.OutChannels);
     }
 
