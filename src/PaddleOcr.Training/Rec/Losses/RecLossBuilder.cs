@@ -1,15 +1,12 @@
-using PaddleOcr.Training.Rec.Losses;
+using System.Globalization;
 
 namespace PaddleOcr.Training.Rec.Losses;
 
 /// <summary>
-/// RecLossBuilder：从配置构建损失函数。
+/// Build rec losses from YAML-like config dictionaries.
 /// </summary>
 public static class RecLossBuilder
 {
-    /// <summary>
-    /// 构建损失函数。
-    /// </summary>
     public static IRecLoss Build(string name, Dictionary<string, object>? config = null)
     {
         config ??= new Dictionary<string, object>();
@@ -17,26 +14,17 @@ public static class RecLossBuilder
         {
             "ctc" or "ctcloss" => new CTCLoss(
                 blank: GetInt(config, "blank", 0),
-                reduction: GetBool(config, "reduction", true)
-            ),
+                reduction: GetBool(config, "reduction", true)),
             "attn" or "attention" or "attentionloss" => new AttentionLoss(
-                ignoreIndex: GetInt(config, "ignore_index", 0)
-            ),
+                ignoreIndex: GetInt(config, "ignore_index", 0)),
             "sar" or "sarloss" => new SARLoss(
-                ignoreIndex: GetInt(config, "ignore_index", 0)
-            ),
+                ignoreIndex: GetInt(config, "ignore_index", 0)),
             "nrtr" or "nrtrloss" => new NRTRLoss(
                 labelSmoothing: GetFloat(config, "label_smoothing", 0.0f),
-                paddingIdx: GetInt(config, "padding_idx", 0)
-            ),
+                paddingIdx: GetInt(config, "padding_idx", 0)),
             "srn" or "srnloss" => new SRNLoss(
-                weight: GetFloat(config, "weight", 1.0f)
-            ),
-            "multi" or "multiloss" => new MultiLoss(
-                ctcWeight: GetFloat(config, "ctc_weight", 1.0f),
-                attnWeight: GetFloat(config, "attn_weight", 1.0f),
-                ignoreIndex: GetInt(config, "ignore_index", 0)
-            ),
+                weight: GetFloat(config, "weight", 1.0f)),
+            "multi" or "multiloss" => BuildMultiLoss(config),
             "aster" or "asterloss" => new AsterLoss(),
             "pren" or "prenloss" => new PRENLoss(),
             "vl" or "vlloss" => new VLLoss(),
@@ -54,18 +42,146 @@ public static class RecLossBuilder
         };
     }
 
+    private static IRecLoss BuildMultiLoss(Dictionary<string, object> config)
+    {
+        var ctcWeight = GetFloat(config, "ctc_weight", 1.0f);
+        var gtcWeight = GetFloat(config, "gtc_weight", GetFloat(config, "attn_weight", 1.0f));
+        var ignoreIndex = GetInt(config, "ignore_index", 0);
+
+        IRecLoss ctcLoss = new CTCLoss();
+        IRecLoss? gtcLoss = null;
+
+        if (TryGetList(config, "loss_config_list", out var lossConfigList))
+        {
+            foreach (var item in lossConfigList)
+            {
+                if (item is not Dictionary<string, object?> node || node.Count == 0)
+                {
+                    continue;
+                }
+
+                var kv = node.First();
+                var subConfig = ToDictionary(kv.Value);
+                var built = Build(kv.Key, subConfig);
+                if (IsCtcLoss(kv.Key))
+                {
+                    ctcLoss = built;
+                }
+                else
+                {
+                    gtcLoss = built;
+                }
+            }
+        }
+
+        if (gtcLoss is null && gtcWeight > 0f)
+        {
+            gtcLoss = new AttentionLoss(ignoreIndex);
+        }
+
+        return new MultiLoss(
+            ctcLoss: ctcLoss,
+            gtcLoss: gtcLoss,
+            ctcWeight: ctcWeight,
+            gtcWeight: gtcWeight,
+            ctcLabelKey: "label_ctc",
+            gtcLabelKey: "label_gtc");
+    }
+
+    private static bool IsCtcLoss(string lossName)
+    {
+        return lossName.Contains("ctc", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryGetList(Dictionary<string, object> config, string key, out IList<object?> list)
+    {
+        list = [];
+        if (!config.TryGetValue(key, out var raw) || raw is null)
+        {
+            return false;
+        }
+
+        if (raw is IList<object?> objectList)
+        {
+            list = objectList;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static Dictionary<string, object> ToDictionary(object? raw)
+    {
+        if (raw is null)
+        {
+            return new Dictionary<string, object>();
+        }
+
+        if (raw is Dictionary<string, object> dict)
+        {
+            return dict;
+        }
+
+        if (raw is Dictionary<string, object?> nullableDict)
+        {
+            return nullableDict.ToDictionary(kv => kv.Key, kv => kv.Value ?? (object)string.Empty);
+        }
+
+        if (raw is IReadOnlyDictionary<string, object?> roDict)
+        {
+            return roDict.ToDictionary(kv => kv.Key, kv => kv.Value ?? (object)string.Empty);
+        }
+
+        return new Dictionary<string, object>();
+    }
+
     private static int GetInt(Dictionary<string, object> config, string key, int defaultValue)
     {
-        return config.ContainsKey(key) && config[key] is int value ? value : defaultValue;
+        if (!config.TryGetValue(key, out var raw) || raw is null)
+        {
+            return defaultValue;
+        }
+
+        return raw switch
+        {
+            int i => i,
+            long l => (int)l,
+            float f => (int)f,
+            double d => (int)d,
+            decimal m => (int)m,
+            _ => int.TryParse(raw.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : defaultValue
+        };
     }
 
     private static float GetFloat(Dictionary<string, object> config, string key, float defaultValue)
     {
-        return config.ContainsKey(key) && config[key] is float value ? value : defaultValue;
+        if (!config.TryGetValue(key, out var raw) || raw is null)
+        {
+            return defaultValue;
+        }
+
+        return raw switch
+        {
+            float f => f,
+            double d => (float)d,
+            decimal m => (float)m,
+            int i => i,
+            long l => l,
+            _ => float.TryParse(raw.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) ? parsed : defaultValue
+        };
     }
 
     private static bool GetBool(Dictionary<string, object> config, string key, bool defaultValue)
     {
-        return config.ContainsKey(key) && config[key] is bool value ? value : defaultValue;
+        if (!config.TryGetValue(key, out var raw) || raw is null)
+        {
+            return defaultValue;
+        }
+
+        return raw switch
+        {
+            bool b => b,
+            _ => bool.TryParse(raw.ToString(), out var parsed) ? parsed : defaultValue
+        };
     }
 }

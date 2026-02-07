@@ -31,6 +31,8 @@ internal sealed class TrainingConfigView
 
     public string TrainLabelFile => ResolvePath(GetFirstString("Train.dataset.label_file_list"));
     public string EvalLabelFile => ResolvePath(GetFirstString("Eval.dataset.label_file_list"));
+    public IReadOnlyList<string> TrainLabelFiles => GetStringList("Train.dataset.label_file_list").Select(ResolvePath).ToList();
+    public IReadOnlyList<string> EvalLabelFiles => GetStringList("Eval.dataset.label_file_list").Select(ResolvePath).ToList();
     public string DataDir => ResolvePath(GetString("Train.dataset.data_dir", "."));
     public string EvalDataDir => ResolvePath(GetString("Eval.dataset.data_dir", DataDir));
     public string InvalidSamplePolicy => GetString("Train.dataset.invalid_sample_policy", "skip").Trim().ToLowerInvariant();
@@ -73,7 +75,29 @@ internal sealed class TrainingConfigView
 
     private string ResolvePath(string path)
     {
-        return Path.IsPathRooted(path) ? path : Path.GetFullPath(Path.Combine(_configDir, path));
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return string.Empty;
+        }
+
+        if (Path.IsPathRooted(path))
+        {
+            return path;
+        }
+
+        var fromCwd = Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), path));
+        if (File.Exists(fromCwd) || Directory.Exists(fromCwd))
+        {
+            return fromCwd;
+        }
+
+        var fromConfig = Path.GetFullPath(Path.Combine(_configDir, path));
+        if (File.Exists(fromConfig) || Directory.Exists(fromConfig))
+        {
+            return fromConfig;
+        }
+
+        return fromCwd;
     }
 
     private string? ResolvePathOrNull(string? path)
@@ -83,17 +107,50 @@ internal sealed class TrainingConfigView
             return null;
         }
 
-        return ResolvePath(path);
+        var resolved = ResolvePath(path);
+        if (File.Exists(resolved) || Directory.Exists(resolved))
+        {
+            return resolved;
+        }
+
+        var fileName = Path.GetFileName(path);
+        if (!string.IsNullOrWhiteSpace(fileName))
+        {
+            var dictCandidate = Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "assets", "dicts", fileName));
+            if (File.Exists(dictCandidate))
+            {
+                return dictCandidate;
+            }
+        }
+
+        return resolved;
     }
 
     private string GetFirstString(string path)
     {
-        if (GetByPath(path) is List<object?> list && list.Count > 0 && list[0] is not null)
+        var values = GetStringList(path);
+        return values.Count == 0 ? string.Empty : values[0];
+    }
+
+    private List<string> GetStringList(string path)
+    {
+        var raw = GetByPath(path);
+        if (raw is IList<object?> list)
         {
-            return list[0]!.ToString() ?? string.Empty;
+            return list
+                .Where(x => x is not null)
+                .Select(x => x!.ToString() ?? string.Empty)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToList();
         }
 
-        return string.Empty;
+        var scalar = raw?.ToString();
+        if (!string.IsNullOrWhiteSpace(scalar))
+        {
+            return [scalar];
+        }
+
+        return [];
     }
 
     private List<int> GetIntListFromTransforms(string transformsPath, string opName, string field)
@@ -240,6 +297,10 @@ internal sealed class TrainingConfigView
         {
             return dict.ToDictionary(kv => kv.Key, kv => kv.Value ?? (object)string.Empty);
         }
+        if (lrObj is IReadOnlyDictionary<string, object?> roDict)
+        {
+            return roDict.ToDictionary(kv => kv.Key, kv => kv.Value ?? (object)string.Empty);
+        }
 
         return new Dictionary<string, object>();
     }
@@ -255,6 +316,10 @@ internal sealed class TrainingConfigView
         if (lossObj is Dictionary<string, object?> dict)
         {
             return dict.ToDictionary(kv => kv.Key, kv => kv.Value ?? (object)string.Empty);
+        }
+        if (lossObj is IReadOnlyDictionary<string, object?> roDict)
+        {
+            return roDict.ToDictionary(kv => kv.Key, kv => kv.Value ?? (object)string.Empty);
         }
 
         return new Dictionary<string, object>();
@@ -281,7 +346,39 @@ internal sealed class TrainingConfigView
     /// <summary>
     /// 是否使用 MultiScaleDataSet。
     /// </summary>
-    public bool UseMultiScale => GetString("Train.dataset.name", "").Equals("MultiScaleDataSet", StringComparison.OrdinalIgnoreCase);
+    public bool UseMultiScale
+    {
+        get
+        {
+            if (!GetString("Train.dataset.name", "").Equals("MultiScaleDataSet", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            var raw = GetByPath("Train.dataset.ds_width");
+            if (raw is null)
+            {
+                return true;
+            }
+
+            if (raw is bool b)
+            {
+                return b;
+            }
+
+            if (bool.TryParse(raw.ToString(), out var parsed))
+            {
+                return parsed;
+            }
+
+            if (raw is IList<object?> list)
+            {
+                return list.Count > 0;
+            }
+
+            return true;
+        }
+    }
 
     /// <summary>
     /// MultiScale 候选宽度列表。
@@ -292,12 +389,17 @@ internal sealed class TrainingConfigView
         get
         {
             var raw = GetByPath("Train.dataset.ds_width");
+            if (raw is bool b && !b)
+            {
+                return [RecImageShape.W];
+            }
             if (raw is IList<object?> list)
             {
-                return list
+                var parsed = list
                     .Select(x => int.TryParse(x?.ToString(), out var v) ? v : 0)
                     .Where(v => v > 0)
                     .ToArray();
+                return parsed.Length == 0 ? [RecImageShape.W] : parsed;
             }
             return [320, 256, 192, 128, 96, 64];
         }
@@ -306,5 +408,10 @@ internal sealed class TrainingConfigView
     public string GetConfigString(string path, string fallback)
     {
         return GetString(path, fallback);
+    }
+
+    public object? GetByPathPublic(string path)
+    {
+        return GetByPath(path);
     }
 }

@@ -19,7 +19,7 @@ public sealed class AttentionLoss : IRecLoss
     public Dictionary<string, Tensor> Forward(Dictionary<string, Tensor> predictions, Dictionary<string, Tensor> batch)
     {
         var logits = predictions["predict"]; // [B, T, C]
-        var targets = batch["label"]; // [B, T]
+        var targets = batch.ContainsKey("label_gtc") ? batch["label_gtc"] : batch["label"]; // [B, T]
 
         // Reshape: [B, T, C] -> [B*T, C]
         var b = logits.shape[0];

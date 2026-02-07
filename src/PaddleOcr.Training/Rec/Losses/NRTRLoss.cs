@@ -21,7 +21,7 @@ public sealed class NRTRLoss : IRecLoss
     public Dictionary<string, Tensor> Forward(Dictionary<string, Tensor> predictions, Dictionary<string, Tensor> batch)
     {
         var logits = predictions["predict"]; // [B, T, C]
-        var targets = batch["label"]; // [B, T]
+        var targets = batch.ContainsKey("label_gtc") ? batch["label_gtc"] : batch["label"]; // [B, T]
 
         // 创建 padding mask
         var mask = targets.ne(_paddingIdx).to(ScalarType.Float32); // [B, T]

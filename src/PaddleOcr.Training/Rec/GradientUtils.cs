@@ -53,7 +53,7 @@ public static class GradientUtils
 
         public GradientAccumulator(int accumulationSteps)
         {
-            _accumulationSteps = accumulationSteps;
+            _accumulationSteps = Math.Max(1, accumulationSteps);
             _currentStep = 0;
         }
 

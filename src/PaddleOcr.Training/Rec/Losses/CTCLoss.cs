@@ -21,7 +21,7 @@ public sealed class CTCLoss : IRecLoss
     public Dictionary<string, Tensor> Forward(Dictionary<string, Tensor> predictions, Dictionary<string, Tensor> batch)
     {
         var logits = predictions["predict"]; // [B, T, C]
-        var targets = batch["label"]; // [B, L]
+        var targets = batch.ContainsKey("label_ctc") ? batch["label_ctc"] : batch["label"]; // [B, L]
         var inputLengths = batch.ContainsKey("input_lengths") ? batch["input_lengths"] : null;
         var targetLengths = batch.ContainsKey("target_lengths") ? batch["target_lengths"] : null;
 

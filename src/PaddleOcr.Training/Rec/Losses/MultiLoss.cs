@@ -1,53 +1,69 @@
 using TorchSharp;
 using static TorchSharp.torch;
-using static TorchSharp.torch.nn;
 
 namespace PaddleOcr.Training.Rec.Losses;
 
 /// <summary>
-/// MultiLoss：加权组合 CTC + SAR/NRTR。
+/// Weighted composite loss for multi-head training (CTC + GTC branch).
 /// </summary>
 public sealed class MultiLoss : IRecLoss
 {
     private readonly IRecLoss _ctcLoss;
-    private readonly IRecLoss? _attnLoss;
+    private readonly IRecLoss? _gtcLoss;
     private readonly float _ctcWeight;
-    private readonly float _attnWeight;
+    private readonly float _gtcWeight;
+    private readonly string _ctcLabelKey;
+    private readonly string _gtcLabelKey;
 
-    public MultiLoss(float ctcWeight = 1.0f, float attnWeight = 1.0f, int ignoreIndex = 0)
+    public MultiLoss(
+        IRecLoss? ctcLoss = null,
+        IRecLoss? gtcLoss = null,
+        float ctcWeight = 1.0f,
+        float gtcWeight = 1.0f,
+        string ctcLabelKey = "label",
+        string gtcLabelKey = "label")
     {
+        _ctcLoss = ctcLoss ?? new CTCLoss();
+        _gtcLoss = gtcLoss;
         _ctcWeight = ctcWeight;
-        _attnWeight = attnWeight;
-        _ctcLoss = new CTCLoss();
-        if (attnWeight > 0.0f)
-        {
-            _attnLoss = new AttentionLoss(ignoreIndex);
-        }
+        _gtcWeight = gtcWeight;
+        _ctcLabelKey = ctcLabelKey;
+        _gtcLabelKey = gtcLabelKey;
     }
 
     public Dictionary<string, Tensor> Forward(Dictionary<string, Tensor> predictions, Dictionary<string, Tensor> batch)
     {
         var result = new Dictionary<string, Tensor>();
 
-        // CTC loss
-        var ctcPred = new Dictionary<string, Tensor> { ["predict"] = predictions["ctc"] };
-        var ctcResult = _ctcLoss.Forward(ctcPred, batch);
+        var ctcPredTensor = predictions.TryGetValue("ctc", out var ctc) ? ctc : predictions["predict"];
+        var ctcBatch = BuildBatchForLabel(batch, _ctcLabelKey);
+        var ctcResult = _ctcLoss.Forward(new Dictionary<string, Tensor> { ["predict"] = ctcPredTensor }, ctcBatch);
         var ctcLoss = ctcResult["loss"];
         result["ctc_loss"] = ctcLoss;
 
         var totalLoss = ctcLoss * _ctcWeight;
 
-        // Attention loss (if available)
-        if (_attnLoss != null && predictions.ContainsKey("gtc"))
+        if (_gtcLoss is not null && predictions.TryGetValue("gtc", out var gtcPred))
         {
-            var attnPred = new Dictionary<string, Tensor> { ["predict"] = predictions["gtc"] };
-            var attnResult = _attnLoss.Forward(attnPred, batch);
-            var attnLoss = attnResult["loss"];
-            result["attn_loss"] = attnLoss;
-            totalLoss = totalLoss + attnLoss * _attnWeight;
+            var gtcBatch = BuildBatchForLabel(batch, _gtcLabelKey);
+            var gtcResult = _gtcLoss.Forward(new Dictionary<string, Tensor> { ["predict"] = gtcPred }, gtcBatch);
+            var gtcLoss = gtcResult["loss"];
+            result["gtc_loss"] = gtcLoss;
+            totalLoss += gtcLoss * _gtcWeight;
         }
 
         result["loss"] = totalLoss;
+        return result;
+    }
+
+    private static Dictionary<string, Tensor> BuildBatchForLabel(Dictionary<string, Tensor> batch, string labelKey)
+    {
+        var result = new Dictionary<string, Tensor>(batch);
+        if (batch.TryGetValue(labelKey, out var label))
+        {
+            result["label"] = label;
+        }
+
         return result;
     }
 }
