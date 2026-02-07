@@ -47,21 +47,35 @@ public sealed class ServiceClientExecutor : ICommandExecutor
         var outputDir = context.Options.TryGetValue("--output", out var outDir) ? outDir : "./hubserving_result";
         var parallel = ParseInt(context, "--parallel", 1, 1, 64);
         var timeoutMs = ParseInt(context, "--timeout_ms", 15000, 100, 300000);
+        var retries = ParseInt(context, "--retries", 0, 0, 10);
+        var stressRounds = ParseInt(context, "--stress_rounds", 1, 1, 1000);
+        var dumpFailures = context.Options.TryGetValue("--dump_failures", out var df) &&
+                           df.Equals("true", StringComparison.OrdinalIgnoreCase);
         if (visualize)
         {
             Directory.CreateDirectory(outputDir);
         }
+        if (dumpFailures)
+        {
+            Directory.CreateDirectory(Path.Combine(outputDir, "failures"));
+        }
 
         var totalMs = 0d;
         var okCount = 0;
+        var failCount = 0;
+        var totalRequests = imageFiles.Count * stressRounds;
         var options = new ParallelOptions
         {
             MaxDegreeOfParallelism = parallel,
             CancellationToken = cancellationToken
         };
         var sync = new object();
-        await Parallel.ForEachAsync(imageFiles, options, async (imageFile, ct) =>
+        var workItems = Enumerable.Range(0, stressRounds)
+            .SelectMany(round => imageFiles.Select(file => (Round: round + 1, Image: file)))
+            .ToList();
+        await Parallel.ForEachAsync(workItems, options, async (item, ct) =>
         {
+            var imageFile = item.Image;
             byte[] bytes;
             try
             {
@@ -70,45 +84,69 @@ public sealed class ServiceClientExecutor : ICommandExecutor
             catch (Exception ex)
             {
                 context.Logger.LogWarning(ex, "error in loading image: {Image}", imageFile);
+                lock (sync)
+                {
+                    failCount++;
+                }
+                if (dumpFailures)
+                {
+                    DumpFailure(outputDir, imageFile, item.Round, "read_error", ex.Message);
+                }
                 return;
             }
 
-            using var reqCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            reqCts.CancelAfter(timeoutMs);
+            HttpResponseMessage? resp = null;
+            string? failureReason = null;
             var payload = new { images = new[] { Convert.ToBase64String(bytes) } };
             var sw = Stopwatch.StartNew();
-            HttpResponseMessage resp;
-            try
+            for (var attempt = 0; attempt <= retries; attempt++)
             {
-                resp = await Http.PostAsJsonAsync(serverUri, payload, reqCts.Token);
+                using var reqCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                reqCts.CancelAfter(timeoutMs);
+                try
+                {
+                    resp = await Http.PostAsJsonAsync(serverUri, payload, reqCts.Token);
+                    if (resp.IsSuccessStatusCode)
+                    {
+                        failureReason = null;
+                        break;
+                    }
+
+                    failureReason = $"http_{(int)resp.StatusCode}";
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    failureReason = $"timeout_{timeoutMs}ms";
+                }
+                catch (Exception ex)
+                {
+                    failureReason = ex.GetType().Name;
+                }
             }
-            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-            {
-                context.Logger.LogWarning("request timeout ({TimeoutMs}ms): {Image}", timeoutMs, imageFile);
-                return;
-            }
-            catch (Exception ex)
-            {
-                context.Logger.LogWarning(ex, "request failed: {Image}", imageFile);
-                return;
-            }
-            finally
-            {
-                sw.Stop();
-            }
+            sw.Stop();
 
             lock (sync)
             {
                 totalMs += sw.Elapsed.TotalMilliseconds;
             }
-            if (!resp.IsSuccessStatusCode)
+            if (resp is null || !resp.IsSuccessStatusCode)
             {
-                context.Logger.LogWarning("server returned {Code} for {Image}", (int)resp.StatusCode, imageFile);
+                context.Logger.LogWarning(
+                    "service request failed: image={Image}, round={Round}, reason={Reason}",
+                    imageFile, item.Round, failureReason ?? "unknown");
+                lock (sync)
+                {
+                    failCount++;
+                }
+                if (dumpFailures)
+                {
+                    DumpFailure(outputDir, imageFile, item.Round, "request_failed", failureReason ?? "unknown");
+                }
                 return;
             }
 
             var json = await resp.Content.ReadAsStringAsync(ct);
-            context.Logger.LogInformation("Predict time of {Image}: {Ms:F1}ms", imageFile, sw.Elapsed.TotalMilliseconds);
+            context.Logger.LogInformation("Predict time of {Image} (round={Round}): {Ms:F1}ms", imageFile, item.Round, sw.Elapsed.TotalMilliseconds);
             lock (sync)
             {
                 okCount++;
@@ -127,7 +165,20 @@ public sealed class ServiceClientExecutor : ICommandExecutor
         }
 
         var avgMs = totalMs / okCount;
-        return CommandResult.Ok($"service test completed: success={okCount}/{imageFiles.Count}, avg_time_ms={avgMs:F2}, parallel={parallel}, timeout_ms={timeoutMs}");
+        WriteReport(outputDir, new
+        {
+            total_requests = totalRequests,
+            success = okCount,
+            failed = failCount,
+            avg_time_ms = avgMs,
+            parallel,
+            timeout_ms = timeoutMs,
+            retries,
+            stress_rounds = stressRounds,
+            generated_at_utc = DateTime.UtcNow
+        });
+        return CommandResult.Ok(
+            $"service test completed: success={okCount}/{totalRequests}, failed={failCount}, avg_time_ms={avgMs:F2}, parallel={parallel}, timeout_ms={timeoutMs}, retries={retries}, stress_rounds={stressRounds}");
     }
 
     private static IEnumerable<string> EnumerateImages(string path)
@@ -233,5 +284,31 @@ public sealed class ServiceClientExecutor : ICommandExecutor
         }
 
         return Math.Clamp(value, min, max);
+    }
+
+    private static void DumpFailure(string outputDir, string imageFile, int round, string kind, string detail)
+    {
+        var dir = Path.Combine(outputDir, "failures");
+        Directory.CreateDirectory(dir);
+        var file = Path.Combine(
+            dir,
+            $"{Path.GetFileNameWithoutExtension(imageFile)}_r{round}_{DateTime.UtcNow:yyyyMMddHHmmssfff}.json");
+        var payload = JsonSerializer.Serialize(new
+        {
+            image = imageFile,
+            round,
+            kind,
+            detail,
+            at_utc = DateTime.UtcNow
+        }, new JsonSerializerOptions { WriteIndented = true });
+        File.WriteAllText(file, payload);
+    }
+
+    private static void WriteReport(string outputDir, object report)
+    {
+        Directory.CreateDirectory(outputDir);
+        var file = Path.Combine(outputDir, "service_test_report.json");
+        var json = JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true });
+        File.WriteAllText(file, json);
     }
 }
