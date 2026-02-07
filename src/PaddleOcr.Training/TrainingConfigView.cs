@@ -40,6 +40,7 @@ internal sealed class TrainingConfigView
     public float DetThreshMax => Clamp(GetFloatAny(["Train.dataset.det_thresh_max", "Loss.det_thresh_max"], 0.7f), 0f, 1f);
     public float DetShrinkLossWeight => Math.Max(0f, GetFloatAny(["Loss.det_shrink_loss_weight", "Loss.alpha"], 1f));
     public float DetThresholdLossWeight => Math.Max(0f, GetFloatAny(["Loss.det_threshold_loss_weight", "Loss.beta"], 0.5f));
+    public float DetEvalIouThresh => Clamp(GetFloatAny(["Global.det_eval_iou_thresh", "Metric.det_eval_iou_thresh"], 0.5f), 0f, 1f);
 
     public (int C, int H, int W) ImageShape => ParseImageShape();
     public int DetInputSize => GetInt("Train.dataset.transforms.ResizeTextImg.size", 640);

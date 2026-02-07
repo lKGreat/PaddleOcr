@@ -30,6 +30,7 @@ Last updated: 2026-02-07
   - dual-branch output (`shrink`, `threshold`)
   - DB-style composite loss (BCE + L1 weighted)
   - configurable shrink/threshold map generation via config (`Loss.det_*`)
+  - evaluation upgraded to detection-level matching (`precision/recall/fscore`) with configurable IoU threshold
 - Unified export manifest schema with `schema_version=1.0`.
 - Added `service test` runtime controls:
   - `--parallel`

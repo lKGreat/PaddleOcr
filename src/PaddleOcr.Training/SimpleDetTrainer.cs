@@ -131,7 +131,7 @@ internal sealed class SimpleDetTrainer
                 break;
             }
 
-            var metrics = Evaluate(model, evalSet, cfg.EvalBatchSize, size, dev, evalRng);
+            var metrics = Evaluate(model, evalSet, cfg.EvalBatchSize, size, dev, evalRng, cfg.DetEvalIouThresh);
             if (metrics.Fscore > bestFscore + cfg.MinImproveDelta)
             {
                 bestFscore = metrics.Fscore;
@@ -227,48 +227,53 @@ internal sealed class SimpleDetTrainer
             model.load(ckpt);
         }
 
-        var metrics = Evaluate(model, evalSet, cfg.EvalBatchSize, size, dev, new Random(cfg.Seed + 23));
+        var metrics = Evaluate(model, evalSet, cfg.EvalBatchSize, size, dev, new Random(cfg.Seed + 23), cfg.DetEvalIouThresh);
         Directory.CreateDirectory(cfg.SaveModelDir);
         File.WriteAllText(
             Path.Combine(cfg.SaveModelDir, "eval_result.json"),
             JsonSerializer.Serialize(metrics, new JsonSerializerOptions { WriteIndented = true }));
         _logger.LogInformation(
-            "det eval metrics: precision={P:F4}, recall={R:F4}, fscore={F:F4}, iou={IoU:F4}",
-            metrics.Precision, metrics.Recall, metrics.Fscore, metrics.Iou);
+            "det eval metrics: precision={P:F4}, recall={R:F4}, fscore={F:F4}, iou={IoU:F4}, iou_thresh={T:F2}, tp={TP}, fp={FP}, fn={FN}",
+            metrics.Precision, metrics.Recall, metrics.Fscore, metrics.Iou, metrics.IouThreshold, metrics.Tp, metrics.Fp, metrics.Fn);
         return new EvaluationSummary(metrics.Iou, evalSet.Count);
     }
 
-    private static DetEvalMetrics Evaluate(SimpleDetNet model, SimpleDetDataset evalSet, int batchSize, int size, Device dev, Random evalRng)
+    private static DetEvalMetrics Evaluate(SimpleDetNet model, SimpleDetDataset evalSet, int batchSize, int size, Device dev, Random evalRng, float evalIouThresh)
     {
         model.eval();
-        var interSum = 0f;
-        var unionSum = 0f;
-        var predSum = 0f;
-        var gtSum = 0f;
+        var summary = new DetMatchSummary(0, 0, 0, 0f);
         using var noGrad = torch.no_grad();
         foreach (var (images, shrinkMaps, _, batch) in evalSet.GetBatches(batchSize, false, evalRng))
         {
             using var x = torch.tensor(images, dtype: ScalarType.Float32).reshape(batch, 3, size, size).to(dev);
-            using var y = torch.tensor(shrinkMaps, dtype: ScalarType.Float32).reshape(batch, 1, size, size).to(dev);
             using var predAll = model.call(x);
-            using var pred = predAll.narrow(1, 0, 1).sigmoid();
-            using var pb = pred.gt(0.5f);
-            using var yb = y.gt(0.5f);
-            using var inter = pb.logical_and(yb).sum();
-            using var union = pb.logical_or(yb).sum();
-            using var predArea = pb.sum();
-            using var gtArea = yb.sum();
-            interSum += inter.ToSingle();
-            unionSum += union.ToSingle();
-            predSum += predArea.ToSingle();
-            gtSum += gtArea.ToSingle();
+            using var pred = predAll.narrow(1, 0, 1).sigmoid().cpu();
+            var predData = pred.data<float>().ToArray();
+            var area = size * size;
+            for (var bi = 0; bi < batch; bi++)
+            {
+                var predMask = new bool[area];
+                var gtMask = new bool[area];
+                var offset = bi * area;
+                for (var i = 0; i < area; i++)
+                {
+                    predMask[i] = predData[offset + i] > 0.5f;
+                    gtMask[i] = shrinkMaps[offset + i] > 0.5f;
+                }
+
+                summary += DetMetricEvaluator.EvaluateSingle(predMask, gtMask, size, size, evalIouThresh);
+            }
         }
 
-        var iou = unionSum <= 0f ? 0f : interSum / unionSum;
-        var precision = predSum <= 0f ? 0f : interSum / predSum;
-        var recall = gtSum <= 0f ? 0f : interSum / gtSum;
-        var f = precision + recall <= 0f ? 0f : 2f * precision * recall / (precision + recall);
-        return new DetEvalMetrics(precision, recall, f, iou);
+        return new DetEvalMetrics(
+            Precision: summary.Precision,
+            Recall: summary.Recall,
+            Fscore: summary.Fscore,
+            Iou: summary.MeanIou,
+            IouThreshold: evalIouThresh,
+            Tp: summary.TruePositive,
+            Fp: summary.FalsePositive,
+            Fn: summary.FalseNegative);
     }
 
     private static void SeedEverything(int seed)
@@ -332,6 +337,7 @@ internal sealed class SimpleDetTrainer
             cfg.DetThreshMax.ToString(System.Globalization.CultureInfo.InvariantCulture),
             cfg.DetShrinkLossWeight.ToString(System.Globalization.CultureInfo.InvariantCulture),
             cfg.DetThresholdLossWeight.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            cfg.DetEvalIouThresh.ToString(System.Globalization.CultureInfo.InvariantCulture),
             cfg.TrainLabelFile,
             cfg.EvalLabelFile,
             cfg.DataDir,
@@ -430,7 +436,7 @@ internal sealed class SimpleDetNet : Module<Tensor, Tensor>
     }
 }
 
-internal sealed record DetEvalMetrics(float Precision, float Recall, float Fscore, float Iou);
+internal sealed record DetEvalMetrics(float Precision, float Recall, float Fscore, float Iou, float IouThreshold, int Tp, int Fp, int Fn);
 internal sealed record DetCheckpointMeta(string ModelType, int InputSize, int Seed, bool Deterministic, string ConfigFingerprint, DateTime GeneratedAtUtc);
 internal sealed record DetTrainHistoryEntry(
     int Epoch,
