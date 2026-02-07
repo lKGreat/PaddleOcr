@@ -267,8 +267,8 @@ public sealed class InferenceExecutor : ICommandExecutor
 
     private static CommandResult RunSr(PaddleOcr.Core.Cli.ExecutionContext context)
     {
-        var imageDir = GetOrNull(context, "--image_dir");
-        var srModel = GetOrNull(context, "--sr_model_dir");
+        var imageDir = ResolveString(context, "--image_dir", "Global.image_dir", "Global.infer_img");
+        var srModel = ResolveString(context, "--sr_model_dir", "Global.sr_model_dir");
         if (string.IsNullOrWhiteSpace(imageDir) || string.IsNullOrWhiteSpace(srModel))
         {
             return CommandResult.Fail("infer sr requires --image_dir and --sr_model_dir");
@@ -292,8 +292,8 @@ public sealed class InferenceExecutor : ICommandExecutor
 
     private static CommandResult RunTable(PaddleOcr.Core.Cli.ExecutionContext context)
     {
-        var imageDir = GetOrNull(context, "--image_dir");
-        var tableModel = GetOrNull(context, "--table_model_dir");
+        var imageDir = ResolveString(context, "--image_dir", "Global.image_dir", "Global.infer_img");
+        var tableModel = ResolveString(context, "--table_model_dir", "Global.table_model_dir");
         if (string.IsNullOrWhiteSpace(imageDir) || string.IsNullOrWhiteSpace(tableModel))
         {
             return CommandResult.Fail("infer table requires --image_dir and --table_model_dir");
@@ -314,9 +314,9 @@ public sealed class InferenceExecutor : ICommandExecutor
             imageDir,
             tableModel,
             output,
-            GetOrNull(context, "--det_model_dir"),
-            GetOrNull(context, "--rec_model_dir"),
-            GetOrNull(context, "--rec_char_dict_path"),
+            ResolveString(context, "--det_model_dir", "Global.det_model_dir"),
+            ResolveString(context, "--rec_model_dir", "Global.rec_model_dir"),
+            ResolveString(context, "--rec_char_dict_path", "Global.rec_char_dict_path", "Global.character_dict_path"),
             ParseBool(GetOrDefault(context, "--use_space_char", "true")),
             ParseFloat(GetOrDefault(context, "--drop_score", "0.5")),
             ParseFloat(GetOrDefault(context, "--det_db_thresh", "0.3")));
@@ -326,8 +326,14 @@ public sealed class InferenceExecutor : ICommandExecutor
 
     private static CommandResult RunKie(PaddleOcr.Core.Cli.ExecutionContext context, string commandName, string taskName, string modelArg)
     {
-        var imageDir = GetOrNull(context, "--image_dir");
-        var modelPath = GetOrNull(context, modelArg);
+        var imageDir = ResolveString(context, "--image_dir", "Global.image_dir", "Global.infer_img");
+        var modelPath = commandName switch
+        {
+            "kie" => ResolveString(context, modelArg, "Global.kie_model_dir"),
+            "kie-ser" => ResolveString(context, modelArg, "Global.ser_model_dir"),
+            "kie-re" => ResolveString(context, modelArg, "Global.re_model_dir"),
+            _ => ResolveString(context, modelArg)
+        };
         if (string.IsNullOrWhiteSpace(imageDir) || string.IsNullOrWhiteSpace(modelPath))
         {
             return CommandResult.Fail($"infer {commandName} requires --image_dir and {modelArg}");
@@ -349,9 +355,9 @@ public sealed class InferenceExecutor : ICommandExecutor
             imageDir,
             modelPath,
             output,
-            GetOrNull(context, "--det_model_dir"),
-            GetOrNull(context, "--rec_model_dir"),
-            GetOrNull(context, "--rec_char_dict_path"),
+            ResolveString(context, "--det_model_dir", "Global.det_model_dir"),
+            ResolveString(context, "--rec_model_dir", "Global.rec_model_dir"),
+            ResolveString(context, "--rec_char_dict_path", "Global.rec_char_dict_path", "Global.character_dict_path"),
             ParseBool(GetOrDefault(context, "--use_space_char", "true")),
             ParseFloat(GetOrDefault(context, "--drop_score", "0.5")),
             ParseFloat(GetOrDefault(context, "--det_db_thresh", "0.3")));
@@ -367,6 +373,48 @@ public sealed class InferenceExecutor : ICommandExecutor
     private static string GetOrDefault(PaddleOcr.Core.Cli.ExecutionContext context, string key, string defaultValue)
     {
         return context.Options.TryGetValue(key, out var value) ? value : defaultValue;
+    }
+
+    private static string? ResolveString(PaddleOcr.Core.Cli.ExecutionContext context, string optionKey, params string[] configPaths)
+    {
+        if (context.Options.TryGetValue(optionKey, out var opt) && !string.IsNullOrWhiteSpace(opt))
+        {
+            return opt;
+        }
+
+        foreach (var path in configPaths)
+        {
+            var fromCfg = GetConfigString(context.Config, path);
+            if (!string.IsNullOrWhiteSpace(fromCfg))
+            {
+                return fromCfg;
+            }
+        }
+
+        return null;
+    }
+
+    private static string? GetConfigString(IReadOnlyDictionary<string, object?> root, string path)
+    {
+        object? cur = root;
+        foreach (var part in path.Split('.', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (cur is IReadOnlyDictionary<string, object?> rd && rd.TryGetValue(part, out var rv))
+            {
+                cur = rv;
+                continue;
+            }
+
+            if (cur is Dictionary<string, object?> d && d.TryGetValue(part, out var dv))
+            {
+                cur = dv;
+                continue;
+            }
+
+            return null;
+        }
+
+        return cur?.ToString();
     }
 
     private static string ResolveOutputDir(PaddleOcr.Core.Cli.ExecutionContext context, string command)

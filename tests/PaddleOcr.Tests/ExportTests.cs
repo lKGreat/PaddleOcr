@@ -1,6 +1,7 @@
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using PaddleOcr.Export;
+using System.Text.Json;
 
 namespace PaddleOcr.Tests;
 
@@ -33,6 +34,11 @@ public sealed class ExportTests
 
         File.Exists(target).Should().BeTrue();
         File.Exists(Path.Combine(root, "infer", "manifest.json")).Should().BeTrue();
+
+        var manifestJson = File.ReadAllText(Path.Combine(root, "infer", "manifest.json"));
+        using var doc = JsonDocument.Parse(manifestJson);
+        doc.RootElement.GetProperty("SchemaVersion").GetString().Should().Be("1.0");
+        doc.RootElement.GetProperty("Format").GetString().Should().Be("torchsharp-native");
+        doc.RootElement.GetProperty("ArtifactFile").GetString().Should().Be("model.pt");
     }
 }
-

@@ -21,6 +21,7 @@ public sealed class DetOnnxRunner
 
         Directory.CreateDirectory(options.OutputDir);
         using var det = new InferenceSession(options.DetModelPath);
+        var detPost = InferenceComponentRegistry.GetDetPostprocessor();
 
         var lines = new List<string>(imageFiles.Count);
         foreach (var file in imageFiles)
@@ -29,7 +30,7 @@ public sealed class DetOnnxRunner
             var output = OnnxRuntimeUtils.RunSession(det, img, 640, 640).FirstOrDefault();
             var boxes = output is null
                 ? [PostprocessUtils.FullImageBox(img.Width, img.Height)]
-                : PostprocessUtils.DetectBoxes(output.Data, output.Dims, img.Width, img.Height, options.DetThresh);
+                : detPost(output.Data, output.Dims, img.Width, img.Height, options.DetThresh);
             var sorted = PostprocessUtils.SortBoxes(boxes);
             var payload = sorted.Select(b => new { transcription = "", points = b.Points }).ToList();
             lines.Add($"{Path.GetFileName(file)}\t{JsonSerializer.Serialize(payload)}");
@@ -52,6 +53,7 @@ public sealed class RecOnnxRunner
 
         Directory.CreateDirectory(options.OutputDir);
         var charset = CharsetLoader.Load(options.RecCharDictPath, options.UseSpaceChar);
+        var recPost = InferenceComponentRegistry.GetRecPostprocessor();
         using var rec = new InferenceSession(options.RecModelPath);
 
         var lines = new List<string>(imageFiles.Count);
@@ -61,7 +63,7 @@ public sealed class RecOnnxRunner
             var output = OnnxRuntimeUtils.RunSession(rec, img, 48, 320).FirstOrDefault();
             var recRes = output is null
                 ? new RecResult(string.Empty, 0f)
-                : PostprocessUtils.DecodeRecCtc(output.Data, output.Dims, charset);
+                : recPost(output.Data, output.Dims, charset);
             var payload = recRes.Score >= options.DropScore
                 ? new[] { new { text = recRes.Text, score = recRes.Score } }
                 : Array.Empty<object>();
@@ -121,6 +123,7 @@ public sealed class SystemOnnxRunner
         using var rec = new InferenceSession(options.RecModelPath);
         using var cls = options.ClsModelPath is null ? null : new InferenceSession(options.ClsModelPath);
         var charset = CharsetLoader.Load(options.RecCharDictPath, options.UseSpaceChar);
+        var recPost = InferenceComponentRegistry.GetRecPostprocessor();
 
         var lines = new List<string>(imageFiles.Count);
         foreach (var file in imageFiles)
@@ -149,7 +152,7 @@ public sealed class SystemOnnxRunner
                 var recOut = OnnxRuntimeUtils.RunSession(rec, crop, 48, 320).FirstOrDefault();
                 var recRes = recOut is null
                     ? new RecResult(string.Empty, 0f)
-                    : PostprocessUtils.DecodeRecCtc(recOut.Data, recOut.Dims, charset);
+                    : recPost(recOut.Data, recOut.Dims, charset);
 
                 if (!string.IsNullOrWhiteSpace(recRes.Text) && recRes.Score >= options.DropScore)
                 {
@@ -182,7 +185,8 @@ public sealed class SystemOnnxRunner
             return [PostprocessUtils.FullImageBox(image.Width, image.Height)];
         }
 
-        var boxes = PostprocessUtils.DetectBoxes(detOut.Data, detOut.Dims, image.Width, image.Height, thresh);
+        var detPost = InferenceComponentRegistry.GetDetPostprocessor();
+        var boxes = detPost(detOut.Data, detOut.Dims, image.Width, image.Height, thresh);
         return boxes.Count == 0 ? [PostprocessUtils.FullImageBox(image.Width, image.Height)] : boxes;
     }
 }
@@ -350,6 +354,7 @@ internal static class OcrPipelineHelper
         {
             return [];
         }
+        var recPost = InferenceComponentRegistry.GetRecPostprocessor();
 
         var boxes = det is null
             ? [PostprocessUtils.FullImageBox(original.Width, original.Height)]
@@ -362,7 +367,7 @@ internal static class OcrPipelineHelper
             var recOut = OnnxRuntimeUtils.RunSession(rec, crop, 48, 320).FirstOrDefault();
             var recRes = recOut is null
                 ? new RecResult(string.Empty, 0f)
-                : PostprocessUtils.DecodeRecCtc(recOut.Data, recOut.Dims, charset);
+                : recPost(recOut.Data, recOut.Dims, charset);
             if (!string.IsNullOrWhiteSpace(recRes.Text) && recRes.Score >= dropScore)
             {
                 result.Add(new OcrItem(recRes.Text, box.Points, recRes.Score));
@@ -380,7 +385,8 @@ internal static class OcrPipelineHelper
             return [PostprocessUtils.FullImageBox(width, height)];
         }
 
-        var boxes = PostprocessUtils.DetectBoxes(detOut.Data, detOut.Dims, width, height, thresh);
+        var detPost = InferenceComponentRegistry.GetDetPostprocessor();
+        var boxes = detPost(detOut.Data, detOut.Dims, width, height, thresh);
         return boxes.Count == 0 ? [PostprocessUtils.FullImageBox(width, height)] : boxes;
     }
 }

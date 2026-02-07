@@ -1,0 +1,11 @@
+﻿Global:
+  image_dir: ../../samples/tiny_cls/images
+  kie_model_dir: ../../samples/models/kie_tiny.onnx
+  ser_model_dir: ../../samples/models/kie_ser_tiny.onnx
+  re_model_dir: ../../samples/models/kie_re_tiny.onnx
+  det_model_dir: ../../samples/models/det_tiny.onnx
+  rec_model_dir: ../../samples/models/rec_tiny.onnx
+  rec_char_dict_path: ../../samples/tiny_rec/dict.txt
+
+Architecture:
+  model_type: kie

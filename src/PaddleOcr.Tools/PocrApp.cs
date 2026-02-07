@@ -64,12 +64,17 @@ public sealed class PocrApp
 
     private Task<CommandResult> RunConvertAsync(ParsedCommand parsed, PaddleOcr.Core.Cli.ExecutionContext context, CancellationToken cancellationToken)
     {
-        if (!string.Equals(parsed.Sub, "json2pdmodel", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(parsed.Sub, "json2pdmodel", StringComparison.OrdinalIgnoreCase))
         {
-            return Task.FromResult(CommandResult.Fail("convert supports only json2pdmodel"));
+            return _export.ExecuteAsync("convert:json2pdmodel", context, cancellationToken);
         }
-        
-        return _export.ExecuteAsync("convert:json2pdmodel", context, cancellationToken);
+
+        if (string.Equals(parsed.Sub, "check-json-model", StringComparison.OrdinalIgnoreCase))
+        {
+            return _export.ExecuteAsync("convert:check-json-model", context, cancellationToken);
+        }
+
+        return Task.FromResult(CommandResult.Fail("convert supports: json2pdmodel | check-json-model"));
     }
 
     private PaddleOcr.Core.Cli.ExecutionContext BuildContext(ParsedCommand parsed)

@@ -99,6 +99,7 @@ public static class CommandLine
                  export-center -c <config> [-o K=V ...]
                  infer <det|rec|cls|e2e|kie|kie-ser|kie-re|table|sr|system> [-c <config>] [options]
                  convert json2pdmodel --json_model_dir <dir> --output_dir <dir> --config <yml>
+                 convert check-json-model --json_model_dir <dir>
                  service test --server_url <url> --image_dir <dir>
                  e2e <convert-label|eval> [args]
                """;
@@ -114,4 +115,3 @@ public static class CommandLine
 
     private static bool IsFlag(string token) => token.StartsWith("-");
 }
-

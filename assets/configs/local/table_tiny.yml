@@ -1,0 +1,9 @@
+﻿Global:
+  image_dir: ../../samples/tiny_cls/images
+  table_model_dir: ../../samples/models/table_tiny.onnx
+  det_model_dir: ../../samples/models/det_tiny.onnx
+  rec_model_dir: ../../samples/models/rec_tiny.onnx
+  rec_char_dict_path: ../../samples/tiny_rec/dict.txt
+
+Architecture:
+  model_type: table

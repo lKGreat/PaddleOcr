@@ -1,0 +1,6 @@
+﻿Global:
+  image_dir: ../../samples/tiny_cls/images
+  sr_model_dir: ../../samples/models/sr_tiny.onnx
+
+Architecture:
+  model_type: sr

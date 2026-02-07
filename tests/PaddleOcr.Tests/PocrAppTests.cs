@@ -59,4 +59,23 @@ public sealed class PocrAppTests
         var code = await app.RunAsync(["infer", "system", "--image_dir", "./imgs", "--use_onnx", "true"]);
         code.Should().Be(2);
     }
+
+    [Fact]
+    public async Task RunAsync_Should_Route_Convert_CheckJsonModel_To_Export()
+    {
+        var export = new ProbeExecutor("export");
+        var app = new PocrApp(
+            NullLogger.Instance,
+            new ConfigLoader(),
+            new ProbeExecutor("training"),
+            new ProbeExecutor("inference"),
+            export,
+            new ProbeExecutor("service"),
+            new ProbeExecutor("e2e"));
+
+        var code = await app.RunAsync(["convert", "check-json-model", "--json_model_dir", "./m"]);
+
+        code.Should().Be(0);
+        export.Calls.Should().ContainSingle(c => c == "convert:check-json-model");
+    }
 }

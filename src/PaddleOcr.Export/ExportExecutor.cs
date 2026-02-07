@@ -10,7 +10,8 @@ public sealed class ExportExecutor : ICommandExecutor
         "export",
         "export-onnx",
         "export-center",
-        "convert:json2pdmodel"
+        "convert:json2pdmodel",
+        "convert:check-json-model"
     };
 
     public Task<CommandResult> ExecuteAsync(string subCommand, PaddleOcr.Core.Cli.ExecutionContext context, CancellationToken cancellationToken = default)
@@ -39,6 +40,19 @@ public sealed class ExportExecutor : ICommandExecutor
 
                 exporter.ConvertJsonToPdmodel(jsonDir, outputDir);
                 return Task.FromResult(CommandResult.Ok($"convert:json2pdmodel completed. output={outputDir}"));
+            }
+
+            if (subCommand.Equals("convert:check-json-model", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!context.Options.TryGetValue("--json_model_dir", out var jsonDir))
+                {
+                    return Task.FromResult(CommandResult.Fail("convert check-json-model requires --json_model_dir"));
+                }
+
+                var ok = exporter.ValidateJsonModelDir(jsonDir, out var message);
+                return Task.FromResult(ok
+                    ? CommandResult.Ok($"convert:check-json-model passed: {message}")
+                    : CommandResult.Fail($"convert:check-json-model failed: {message}"));
             }
 
             var cfg = new ExportConfigView(context.Config, context.ConfigPath!);

@@ -87,6 +87,26 @@ public sealed class NativeExporter
         return dstModel;
     }
 
+    public bool ValidateJsonModelDir(string jsonModelDir, out string message)
+    {
+        if (!Directory.Exists(jsonModelDir))
+        {
+            message = $"json model dir not found: {jsonModelDir}";
+            return false;
+        }
+
+        var srcJson = Path.Combine(jsonModelDir, "inference.json");
+        var srcParams = Path.Combine(jsonModelDir, "inference.pdiparams");
+        if (!File.Exists(srcJson) || !File.Exists(srcParams))
+        {
+            message = "missing inference.json or inference.pdiparams";
+            return false;
+        }
+
+        message = jsonModelDir;
+        return true;
+    }
+
     private static void WriteManifest(string dir, object manifest)
     {
         var json = JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true });

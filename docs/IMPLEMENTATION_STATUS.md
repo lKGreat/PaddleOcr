@@ -1,0 +1,37 @@
+# Native Implementation Status Report
+
+Last updated: 2026-02-07
+
+## Summary
+
+- Completed items: `1-13`, `15-17`, `19`
+- Remaining items: `14`, `18`, `20`
+- Current command coverage is tracked in `docs/CAPABILITY_MATRIX.md`
+
+## Delivered in this phase
+
+- Added native ONNX infer pipelines for:
+  - `infer table`
+  - `infer kie`
+  - `infer kie-ser`
+  - `infer kie-re`
+- Enhanced `rec` training/eval metrics:
+  - full-sequence accuracy
+  - character accuracy
+  - average edit distance
+- Unified export manifest schema with `schema_version=1.0`.
+- Added `service test` runtime controls:
+  - `--parallel`
+  - `--timeout_ms`
+- Standardized default infer output paths to `inference_results/<command>`.
+- Extended convert family:
+  - `convert json2pdmodel`
+  - `convert check-json-model`
+- Added tiny config templates for `table/kie/sr`.
+
+## Remaining work
+
+1. Item 14: introduce explicit pre/post-processing registry and plugin contracts.
+2. Item 18: add deterministic-output regression tests for infer/export flows.
+3. Item 20: consolidate final acceptance report with benchmark/smoke evidence.
+

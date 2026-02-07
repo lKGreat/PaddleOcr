@@ -23,13 +23,13 @@ Each item is considered complete only when all conditions are true:
 - [x] 8. Implement `infer kie-re` native execution.
 - [x] 9. Upgrade rec training metrics (char acc, edit distance).
 - [x] 10. Unify export manifest schema across all model types.
-- [ ] 11. Extend convert subcommand family with consistent validation.
+- [x] 11. Extend convert subcommand family with consistent validation.
 - [x] 12. Add service test concurrency/timeout controls.
 - [x] 13. Standardize infer output directory and naming conventions.
-- [ ] 14. Add pre/post-processing component registry architecture.
-- [ ] 15. Complete config view types for `table/kie/sr`.
-- [ ] 16. Add tiny sample assets for `table/kie/sr`.
-- [ ] 17. Add CLI contract tests for missing/invalid args.
-- [ ] 18. Add deterministic output consistency tests.
-- [ ] 19. Finalize project-focused `.gitignore` guardrails.
-- [ ] 20. Publish final implementation matrix and phase handoff report.
+- [x] 14. Add pre/post-processing component registry architecture.
+- [x] 15. Complete config view types for `table/kie/sr`.
+- [x] 16. Add tiny sample assets for `table/kie/sr`.
+- [x] 17. Add CLI contract tests for missing/invalid args.
+- [x] 18. Add deterministic output consistency tests.
+- [x] 19. Finalize project-focused `.gitignore` guardrails.
+- [x] 20. Publish final implementation matrix and phase handoff report.
