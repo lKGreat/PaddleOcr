@@ -60,6 +60,11 @@ Runtime contract interfaces (assembly mode):
 - `PaddleOcr.Inference.Onnx.IDetPostprocessPlugin`
 - `PaddleOcr.Inference.Onnx.IRecPostprocessPlugin`
 - `PaddleOcr.Inference.Onnx.IClsPostprocessPlugin`
+- Optional lifecycle hook: `PaddleOcr.Plugins.IPluginLifecycleHooks`
+
+Fault isolation policy:
+- Current default is fail-open with fallback (`PluginFaultIsolationPolicy.FailOpenWithFallback`).
+- On plugin runtime exception, built-in processor is used as fallback and `OnError` hook is invoked.
 
 Optional:
 - `files`: list of additional files that must exist under package dir.

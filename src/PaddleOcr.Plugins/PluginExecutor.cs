@@ -60,6 +60,8 @@ public sealed class PluginExecutor : ICommandExecutor
 
 public static class PluginRuntimeLoader
 {
+    private static readonly PluginFaultIsolationPolicy FaultPolicy = PluginFaultIsolationPolicy.FailOpenWithFallback;
+
     public static bool LoadPackage(string packageDir, out string message)
     {
         var validation = PluginPackageValidator.Validate(packageDir);
@@ -95,6 +97,12 @@ public static class PluginRuntimeLoader
             message = ex.Message;
             return false;
         }
+    }
+
+    public static bool RegisterRuntimeInstance(PluginManifest manifest, object instance, out string message)
+    {
+        var bindingName = string.IsNullOrWhiteSpace(manifest.RuntimeName) ? manifest.Name ?? "plugin-runtime" : manifest.RuntimeName!;
+        return RegisterInstance(manifest, bindingName, instance, out message);
     }
 
     public static PluginLoadSummary LoadDirectory(string pluginsRoot)
@@ -173,6 +181,7 @@ public static class PluginRuntimeLoader
 
     private static bool RegisterInstance(PluginManifest manifest, string bindingName, object instance, out string message)
     {
+        var hooks = instance as IPluginLifecycleHooks;
         if (manifest.Type!.Equals("preprocess", StringComparison.OrdinalIgnoreCase))
         {
             if (instance is not IInferencePreprocessPlugin plugin)
@@ -181,7 +190,25 @@ public static class PluginRuntimeLoader
                 return false;
             }
 
-            InferencePreprocessRegistry.RegisterInputBuilder(bindingName, plugin.BuildInput);
+            var fallback = InferencePreprocessRegistry.GetInputBuilder("rgb-chw-01");
+            InferencePreprocessRegistry.RegisterInputBuilder(bindingName, (img, dims, h, w) =>
+            {
+                try
+                {
+                    return plugin.BuildInput(img, dims, h, w);
+                }
+                catch (Exception ex)
+                {
+                    hooks?.OnError("preprocess", ex);
+                    if (FaultPolicy == PluginFaultIsolationPolicy.FailOpenWithFallback)
+                    {
+                        return fallback(img, dims, h, w);
+                    }
+
+                    throw;
+                }
+            });
+            hooks?.OnLoaded(bindingName);
             message = $"{bindingName} -> preprocess:{plugin.Name}";
             return true;
         }
@@ -201,7 +228,25 @@ public static class PluginRuntimeLoader
                 return false;
             }
 
-            InferenceComponentRegistry.RegisterDetPostprocessor(bindingName, det.Postprocess);
+            var fallback = InferenceComponentRegistry.GetDetPostprocessor("db-multibox");
+            InferenceComponentRegistry.RegisterDetPostprocessor(bindingName, (data, dims, width, height, thresh) =>
+            {
+                try
+                {
+                    return det.Postprocess(data, dims, width, height, thresh);
+                }
+                catch (Exception ex)
+                {
+                    hooks?.OnError("postprocess.det", ex);
+                    if (FaultPolicy == PluginFaultIsolationPolicy.FailOpenWithFallback)
+                    {
+                        return fallback(data, dims, width, height, thresh);
+                    }
+
+                    throw;
+                }
+            });
+            hooks?.OnLoaded(bindingName);
             message = $"{bindingName} -> postprocess.det:{det.Name}";
             return true;
         }
@@ -214,7 +259,25 @@ public static class PluginRuntimeLoader
                 return false;
             }
 
-            InferenceComponentRegistry.RegisterRecPostprocessor(bindingName, rec.Postprocess);
+            var fallback = InferenceComponentRegistry.GetRecPostprocessor("ctc-greedy");
+            InferenceComponentRegistry.RegisterRecPostprocessor(bindingName, (data, dims, charset) =>
+            {
+                try
+                {
+                    return rec.Postprocess(data, dims, charset);
+                }
+                catch (Exception ex)
+                {
+                    hooks?.OnError("postprocess.rec", ex);
+                    if (FaultPolicy == PluginFaultIsolationPolicy.FailOpenWithFallback)
+                    {
+                        return fallback(data, dims, charset);
+                    }
+
+                    throw;
+                }
+            });
+            hooks?.OnLoaded(bindingName);
             message = $"{bindingName} -> postprocess.rec:{rec.Name}";
             return true;
         }
@@ -227,7 +290,25 @@ public static class PluginRuntimeLoader
                 return false;
             }
 
-            InferenceComponentRegistry.RegisterClsPostprocessor(bindingName, cls.Postprocess);
+            var fallback = InferenceComponentRegistry.GetClsPostprocessor("argmax-softmax");
+            InferenceComponentRegistry.RegisterClsPostprocessor(bindingName, (logits, labels) =>
+            {
+                try
+                {
+                    return cls.Postprocess(logits, labels);
+                }
+                catch (Exception ex)
+                {
+                    hooks?.OnError("postprocess.cls", ex);
+                    if (FaultPolicy == PluginFaultIsolationPolicy.FailOpenWithFallback)
+                    {
+                        return fallback(logits, labels);
+                    }
+
+                    throw;
+                }
+            });
+            hooks?.OnLoaded(bindingName);
             message = $"{bindingName} -> postprocess.cls:{cls.Name}";
             return true;
         }
@@ -251,6 +332,18 @@ public static class PluginRuntimeLoader
             _ => target.Trim().ToLowerInvariant()
         };
     }
+}
+
+public enum PluginFaultIsolationPolicy
+{
+    FailOpenWithFallback = 0,
+    FailFast = 1
+}
+
+public interface IPluginLifecycleHooks
+{
+    void OnLoaded(string bindingName);
+    void OnError(string stage, Exception exception);
 }
 
 public static class PluginPackageValidator
