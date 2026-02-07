@@ -1,6 +1,6 @@
 namespace PaddleOcr.Inference.Onnx;
 
-internal static class InferenceComponentRegistry
+public static class InferenceComponentRegistry
 {
     private static readonly Dictionary<string, Func<float[], int[], int, int, float, List<OcrBox>>> DetPostprocessors =
         new(StringComparer.OrdinalIgnoreCase)

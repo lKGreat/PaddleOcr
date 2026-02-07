@@ -25,6 +25,13 @@ var logger = loggerFactory.CreateLogger("pocr");
 
 try
 {
+    var defaultPluginRoot = Path.Combine(Directory.GetCurrentDirectory(), "plugins", "local");
+    if (Directory.Exists(defaultPluginRoot))
+    {
+        var summary = PluginRuntimeLoader.LoadDirectory(defaultPluginRoot);
+        logger.LogInformation("Plugin runtime bootstrap: loaded={Loaded}, failed={Failed}, root={Root}", summary.Loaded, summary.Failed, defaultPluginRoot);
+    }
+
     var app = new PocrApp(
         logger,
         new ConfigLoader(),

@@ -57,4 +57,12 @@ public sealed class CommandLineTests
         cmd.Sub.Should().Be("validate-package");
         cmd.Options["--package_dir"].Should().Be("./plugins/demo");
     }
+
+    [Fact]
+    public void Parse_Should_Read_Plugin_LoadRuntime_Subcommand()
+    {
+        var cmd = CommandLine.Parse(["plugin", "load-runtime", "--package_dir", "./plugins/p1"]);
+        cmd.Sub.Should().Be("load-runtime");
+        cmd.Options["--package_dir"].Should().Be("./plugins/p1");
+    }
 }

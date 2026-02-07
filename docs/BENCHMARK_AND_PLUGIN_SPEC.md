@@ -31,6 +31,8 @@ Command:
 
 ```bash
 pocr plugin validate-package --package_dir <dir>
+pocr plugin load-runtime --package_dir <dir>
+pocr plugin load-runtime-dir --plugins_root <dir>
 ```
 
 Required file layout:
@@ -46,8 +48,18 @@ Required file layout:
 - `name`
 - `version`
 - `type`: `preprocess` | `postprocess` | `metric`
-- `entry_assembly`
-- `entry_type`
+- `entry_assembly` and `entry_type` (required for assembly mode)
+
+Runtime extension fields:
+- `runtime_name`: optional registry key to register; defaults to `name`.
+- `runtime_target`: required when `type=postprocess`, one of `det|rec|cls`.
+- `alias_of`: optional alias mode source key; if present, assembly fields are optional.
+
+Runtime contract interfaces (assembly mode):
+- `PaddleOcr.Inference.Onnx.IInferencePreprocessPlugin`
+- `PaddleOcr.Inference.Onnx.IDetPostprocessPlugin`
+- `PaddleOcr.Inference.Onnx.IRecPostprocessPlugin`
+- `PaddleOcr.Inference.Onnx.IClsPostprocessPlugin`
 
 Optional:
 - `files`: list of additional files that must exist under package dir.

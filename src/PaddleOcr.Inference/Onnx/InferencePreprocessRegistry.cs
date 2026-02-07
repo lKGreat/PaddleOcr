@@ -5,7 +5,7 @@ using SixLabors.ImageSharp.Processing;
 
 namespace PaddleOcr.Inference.Onnx;
 
-internal static class InferencePreprocessRegistry
+public static class InferencePreprocessRegistry
 {
     private static readonly Dictionary<string, Func<Image<Rgb24>, IReadOnlyList<int>, int, int, DenseTensor<float>>> InputBuilders =
         new(StringComparer.OrdinalIgnoreCase)
@@ -48,4 +48,3 @@ internal static class InferencePreprocessRegistry
         return tensor;
     }
 }
-

@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\PaddleOcr.Core\PaddleOcr.Core.csproj" />
+    <ProjectReference Include="..\PaddleOcr.Inference\PaddleOcr.Inference.csproj" />
   </ItemGroup>
 
   <PropertyGroup>
