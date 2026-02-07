@@ -211,4 +211,70 @@ internal sealed class TrainingConfigView
     {
         return Math.Clamp(value, min, max);
     }
+
+    // 扩展方法：用于 ConfigDrivenRecTrainer
+    public string GetArchitectureString(string path, string fallback)
+    {
+        return GetString($"Architecture.{path}", fallback);
+    }
+
+    public int GetArchitectureInt(string path, int fallback)
+    {
+        return GetInt($"Architecture.{path}", fallback);
+    }
+
+    public string GetOptimizerString(string path, string fallback)
+    {
+        return GetString($"Optimizer.{path}", fallback);
+    }
+
+    public float GetOptimizerFloat(string path, float fallback)
+    {
+        return GetFloat($"Optimizer.{path}", fallback);
+    }
+
+    public Dictionary<string, object> GetOptimizerLrConfig()
+    {
+        var lrObj = GetByPath("Optimizer.lr");
+        if (lrObj is Dictionary<string, object?> dict)
+        {
+            return dict.ToDictionary(kv => kv.Key, kv => kv.Value ?? (object)string.Empty);
+        }
+
+        return new Dictionary<string, object>();
+    }
+
+    public string GetLossString(string path, string fallback)
+    {
+        return GetString($"Loss.{path}", fallback);
+    }
+
+    public Dictionary<string, object> GetLossConfig()
+    {
+        var lossObj = GetByPath("Loss");
+        if (lossObj is Dictionary<string, object?> dict)
+        {
+            return dict.ToDictionary(kv => kv.Key, kv => kv.Value ?? (object)string.Empty);
+        }
+
+        return new Dictionary<string, object>();
+    }
+
+    public bool HasArchitectureConfig()
+    {
+        var arch = GetByPath("Architecture");
+        return arch is Dictionary<string, object?> dict &&
+               (dict.ContainsKey("Backbone") || dict.ContainsKey("Head"));
+    }
+
+    // 公共方法：用于 ConfigDrivenRecTrainer
+    public int GetConfigInt(string path, int fallback)
+    {
+        return GetInt(path, fallback);
+    }
+
+    public bool GetConfigBool(string path, bool fallback)
+    {
+        return GetBool(path, fallback);
+    }
 }

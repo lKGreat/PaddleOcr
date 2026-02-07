@@ -1,9 +1,10 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
     <ProjectReference Include="..\PaddleOcr.Core\PaddleOcr.Core.csproj" />
     <ProjectReference Include="..\PaddleOcr.Config\PaddleOcr.Config.csproj" />
     <ProjectReference Include="..\PaddleOcr.Models\PaddleOcr.Models.csproj" />
+    <ProjectReference Include="..\PaddleOcr.Training\PaddleOcr.Training.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -9,12 +9,10 @@ namespace PaddleOcr.Training.Rec;
 public sealed class AmpTrainingHelper
 {
     private readonly Device _device;
-    private readonly ScalarType _dtype;
 
     public AmpTrainingHelper(Device device)
     {
         _device = device;
-        _dtype = ScalarType.Float16; // 使用 FP16
     }
 
     /// <summary>

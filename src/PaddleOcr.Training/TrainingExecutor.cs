@@ -57,15 +57,32 @@ public sealed class TrainingExecutor : ICommandExecutor
 
             if (string.Equals(cfg.ModelType, "rec", StringComparison.OrdinalIgnoreCase))
             {
-                var trainer = new SimpleRecTrainer(context.Logger);
-                if (subCommand.Equals("train", StringComparison.OrdinalIgnoreCase))
+                // 检测配置中是否有完整的架构配置
+                if (cfg.HasArchitectureConfig())
                 {
-                    var summary = trainer.Train(cfg);
-                    return Task.FromResult(CommandResult.Ok($"train completed: best_acc={summary.BestAccuracy:F4}, save_dir={summary.SaveDir}"));
-                }
+                    var trainer = new Rec.ConfigDrivenRecTrainer(context.Logger);
+                    if (subCommand.Equals("train", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var summary = trainer.Train(cfg);
+                        return Task.FromResult(CommandResult.Ok($"train completed: best_acc={summary.BestAccuracy:F4}, save_dir={summary.SaveDir}"));
+                    }
 
-                var eval = trainer.Eval(cfg);
-                return Task.FromResult(CommandResult.Ok($"eval completed: acc={eval.Accuracy:F4}, samples={eval.Samples}"));
+                    var eval = trainer.Eval(cfg);
+                    return Task.FromResult(CommandResult.Ok($"eval completed: acc={eval.Accuracy:F4}, samples={eval.Samples}"));
+                }
+                else
+                {
+                    // 回退到 SimpleRecTrainer
+                    var trainer = new SimpleRecTrainer(context.Logger);
+                    if (subCommand.Equals("train", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var summary = trainer.Train(cfg);
+                        return Task.FromResult(CommandResult.Ok($"train completed: best_acc={summary.BestAccuracy:F4}, save_dir={summary.SaveDir}"));
+                    }
+
+                    var eval = trainer.Eval(cfg);
+                    return Task.FromResult(CommandResult.Ok($"eval completed: acc={eval.Accuracy:F4}, samples={eval.Samples}"));
+                }
             }
 
             return Task.FromResult(CommandResult.Fail($"model_type '{cfg.ModelType}' not supported yet. Current implementation supports cls/det/rec."));

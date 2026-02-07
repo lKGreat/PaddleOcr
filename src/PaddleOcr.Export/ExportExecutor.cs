@@ -63,8 +63,26 @@ public sealed class ExportExecutor : ICommandExecutor
             var cfg = new ExportConfigView(context.Config, context.ConfigPath!);
             if (subCommand.Equals("export-onnx", StringComparison.OrdinalIgnoreCase))
             {
-                var outFile = exporter.ExportOnnx(cfg);
-                return Task.FromResult(CommandResult.Ok($"export-onnx completed. output={outFile}"));
+                // 尝试使用新的 ONNX 导出器（从 TorchSharp 模型导出）
+                try
+                {
+                    var onnxExporter = new OnnxModelExporter(context.Logger);
+                    var outFile = onnxExporter.ExportOnnxFromConfig(cfg);
+                    return Task.FromResult(CommandResult.Ok($"export-onnx completed. output={outFile}"));
+                }
+                catch
+                {
+                    // 回退到旧的 ONNX 导出（文件复制）
+                    var outFile = exporter.ExportOnnx(cfg);
+                    return Task.FromResult(CommandResult.Ok($"export-onnx completed. output={outFile}"));
+                }
+            }
+
+            if (subCommand.Equals("export-center", StringComparison.OrdinalIgnoreCase))
+            {
+                var centerExporter = new CenterExporter(context.Logger);
+                // TODO: 实现从配置导出中心
+                return Task.FromResult(CommandResult.Fail("export-center not fully implemented yet"));
             }
 
             var native = exporter.ExportNative(cfg);

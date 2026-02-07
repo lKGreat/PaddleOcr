@@ -25,13 +25,13 @@ todos:
     status: completed
   - id: phase8-config-trainer
     content: "Phase 8: ConfigDrivenRecTrainer - 配置驱动训练器，替代 SimpleRecTrainer，支持所有高级特性"
-    status: pending
+    status: completed
   - id: phase9-export
     content: "Phase 9: 导出增强 - TorchSharp->ONNX 导出、Center 导出、JSON->pdmodel 转换增强"
-    status: pending
+    status: completed
   - id: phase10-eval
     content: "Phase 10: 评估增强 - BLEU score、Exp rate、错误分析、混淆矩阵"
-    status: pending
+    status: completed
 isProject: false
 ---
 
@@ -248,7 +248,7 @@ public sealed record RecOnnxOptions(
 
 在 `src/PaddleOcr.Training/Necks/` 目录下:
 
-- `**SequenceEncoder**`: 核心 Neck，包含:
+- `**SequenceEncoder`**: 核心 Neck，包含:
   - `Im2Seq`: reshape `[B,C,1,W]` -> `[B,W,C]`
   - `EncoderWithRNN`: 双向 LSTM
   - `EncoderWithFC`: Linear 投影
@@ -315,7 +315,7 @@ public sealed record RecOnnxOptions(
 - `**AmpTrainingHelper.cs`**: 混合精度训练 (TorchSharp AMP)
 - `**ModelAverager.cs`**: 模型参数平均 (SRN)
 - `**DistillationTrainer.cs`**: 蒸馏训练支持
-- `**GradientUtils.cs**`: 梯度裁剪、梯度累积
+- `**GradientUtils.cs`**: 梯度裁剪、梯度累积
 
 ### 7.3 数据增强和数据集
 
