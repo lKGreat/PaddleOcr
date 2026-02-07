@@ -29,12 +29,13 @@ This repository is a C#/.NET 10 native implementation workspace for PaddleOCR to
 - `pocr service test --server_url ... --image_dir ...`
 - `pocr e2e <convert-label|eval> ...`
 - `pocr benchmark run --scenario ... --iterations ...`
-- `pocr plugin <validate-package|load-runtime|load-runtime-dir> ...`
+- `pocr plugin <validate-package|verify-trust|load-runtime|load-runtime-dir> ...`
 
 ## Notes
 
 - Full OCR post-processing and training kernel implementation is still in progress.
 - Current `infer system` ONNX path executes sessions and records output tensor shapes as integration baseline.
 - Plugin runtime bootstrap loads packages under `./plugins/local` if directory exists.
+- Runtime plugin loading is trust-validated by default (`--allow_untrusted true` to bypass).
 - CI-fast smoke script:
   - `scripts/smoke-ci-fast.ps1` (runs config/doctor checks for local `table`/`kie` tiny configs)

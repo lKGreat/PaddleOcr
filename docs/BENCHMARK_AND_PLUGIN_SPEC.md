@@ -31,6 +31,7 @@ Command:
 
 ```bash
 pocr plugin validate-package --package_dir <dir>
+pocr plugin verify-trust --package_dir <dir>
 pocr plugin load-runtime --package_dir <dir>
 pocr plugin load-runtime-dir --plugins_root <dir>
 ```
@@ -54,6 +55,7 @@ Runtime extension fields:
 - `runtime_name`: optional registry key to register; defaults to `name`.
 - `runtime_target`: required when `type=postprocess`, one of `det|rec|cls`.
 - `alias_of`: optional alias mode source key; if present, assembly fields are optional.
+- `trust`: trust metadata block (recommended, required in trusted mode).
 
 Runtime contract interfaces (assembly mode):
 - `PaddleOcr.Inference.Onnx.IInferencePreprocessPlugin`
@@ -65,6 +67,12 @@ Runtime contract interfaces (assembly mode):
 Fault isolation policy:
 - Current default is fail-open with fallback (`PluginFaultIsolationPolicy.FailOpenWithFallback`).
 - On plugin runtime exception, built-in processor is used as fallback and `OnError` hook is invoked.
+
+Trust validation:
+- Hash algorithm: `sha256`
+- `trust.entry_assembly_sha256` validates entry assembly hash (assembly mode)
+- `trust.files_sha256` validates additional file hashes
+- Trusted loading is default for runtime load commands; use `--allow_untrusted true` to bypass.
 
 Optional:
 - `files`: list of additional files that must exist under package dir.

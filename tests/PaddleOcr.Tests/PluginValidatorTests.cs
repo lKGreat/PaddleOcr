@@ -1,6 +1,7 @@
 using FluentAssertions;
 using PaddleOcr.Inference.Onnx;
 using PaddleOcr.Plugins;
+using System.Security.Cryptography;
 
 namespace PaddleOcr.Tests;
 
@@ -22,9 +23,14 @@ public sealed class PluginValidatorTests
               "runtime_target": "cls",
               "entry_assembly": "demo.dll",
               "entry_type": "Demo.Plugin",
-              "files": [ "demo.dll" ]
+              "files": [ "demo.dll" ],
+              "trust": {
+                "algorithm": "sha256",
+                "entry_assembly_sha256": "__HASH__",
+                "trust_level": "verified"
+              }
             }
-            """);
+            """.Replace("__HASH__", Sha256Hex(Path.Combine(dir, "demo.dll"))));
 
         var result = PluginPackageValidator.Validate(dir);
         result.Valid.Should().BeTrue();
@@ -74,7 +80,10 @@ public sealed class PluginValidatorTests
               "version": "1.0.0",
               "type": "preprocess",
               "runtime_name": "rgb-chw-01-alias",
-              "alias_of": "rgb-chw-01"
+              "alias_of": "rgb-chw-01",
+              "trust": {
+                "trust_level": "internal"
+              }
             }
             """);
 
@@ -103,7 +112,10 @@ public sealed class PluginValidatorTests
               "type": "postprocess",
               "runtime_target": "det",
               "runtime_name": "det-alias",
-              "alias_of": "db-multibox"
+              "alias_of": "db-multibox",
+              "trust": {
+                "trust_level": "verified"
+              }
             }
             """);
         File.WriteAllText(
@@ -120,6 +132,57 @@ public sealed class PluginValidatorTests
         var summary = PluginRuntimeLoader.LoadDirectory(root);
         summary.Loaded.Should().Be(1);
         summary.Failed.Should().Be(1);
+    }
+
+    [Fact]
+    public void Validate_Should_Fail_When_Trust_Required_But_Missing()
+    {
+        var dir = CreateTempDir();
+        File.WriteAllText(Path.Combine(dir, "demo.dll"), "x");
+        File.WriteAllText(
+            Path.Combine(dir, "plugin.json"),
+            """
+            {
+              "schema_version": "1.0",
+              "name": "demo-plugin",
+              "version": "1.2.0",
+              "type": "preprocess",
+              "entry_assembly": "demo.dll",
+              "entry_type": "Demo.Plugin"
+            }
+            """);
+
+        var result = PluginPackageValidator.Validate(dir, requireTrust: true);
+        result.Valid.Should().BeFalse();
+        result.Errors.Should().Contain(x => x.Contains("missing trust metadata", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Validate_Should_Fail_On_Trust_Hash_Mismatch()
+    {
+        var dir = CreateTempDir();
+        File.WriteAllText(Path.Combine(dir, "demo.dll"), "abc");
+        File.WriteAllText(
+            Path.Combine(dir, "plugin.json"),
+            """
+            {
+              "schema_version": "1.0",
+              "name": "demo-plugin",
+              "version": "1.2.0",
+              "type": "preprocess",
+              "entry_assembly": "demo.dll",
+              "entry_type": "Demo.Plugin",
+              "trust": {
+                "algorithm": "sha256",
+                "entry_assembly_sha256": "0000",
+                "trust_level": "verified"
+              }
+            }
+            """);
+
+        var result = PluginPackageValidator.Validate(dir, requireTrust: true);
+        result.Valid.Should().BeFalse();
+        result.Errors.Should().Contain(x => x.Contains("hash mismatch", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -152,6 +215,12 @@ public sealed class PluginValidatorTests
         var dir = Path.Combine(Path.GetTempPath(), "pocr_plugin_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
         return dir;
+    }
+
+    private static string Sha256Hex(string path)
+    {
+        using var stream = File.OpenRead(path);
+        return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
 
     private sealed class ThrowingDetPlugin : IDetPostprocessPlugin, IPluginLifecycleHooks

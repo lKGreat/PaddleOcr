@@ -26,3 +26,4 @@ Last updated: 2026-02-07
 - done: Added CI-fast synthetic rec training benchmark fixture (`assets/configs/local/train_bench_rec_ci_fast.yml`) for `benchmark --scenario train:train`.
 - done: Added plugin runtime loading abstraction (`plugin load-runtime`, `plugin load-runtime-dir`) for preprocess/postprocess extension points.
 - done: Added plugin lifecycle hooks (`IPluginLifecycleHooks`) and fail-open fallback isolation policy for runtime extension faults.
+- done: Added plugin trust metadata validation (`trust` + SHA-256 checks + verify-trust command) and default trusted runtime loading mode.

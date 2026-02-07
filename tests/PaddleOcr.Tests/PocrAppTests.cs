@@ -215,4 +215,25 @@ public sealed class PocrAppTests
         code.Should().Be(0);
         plugin.Calls.Should().ContainSingle(c => c == "load-runtime");
     }
+
+    [Fact]
+    public async Task RunAsync_Should_Route_Plugin_VerifyTrust_To_Plugin_Executor()
+    {
+        var plugin = new ProbeExecutor("plugin");
+        var app = new PocrApp(
+            NullLogger.Instance,
+            new ConfigLoader(),
+            new ProbeExecutor("training"),
+            new ProbeExecutor("inference"),
+            new ProbeExecutor("export"),
+            new ProbeExecutor("service"),
+            new ProbeExecutor("e2e"),
+            new ProbeExecutor("benchmark"),
+            plugin);
+
+        var code = await app.RunAsync(["plugin", "verify-trust", "--package_dir", "."]);
+
+        code.Should().Be(0);
+        plugin.Calls.Should().ContainSingle(c => c == "verify-trust");
+    }
 }

@@ -106,7 +106,7 @@ public static class CommandLine
                  service test --server_url <url> --image_dir <dir> [--parallel N --timeout_ms MS --retries N --stress_rounds N --dump_failures true]
                  e2e <convert-label|eval> [args]
                  benchmark run --scenario <infer:system|service:test|e2e:eval|export:export-onnx|train:train> [--profile smoke|balanced|stress] [--warmup N --iterations N --continue_on_error true --report_json <path>] [scenario options...]
-                 plugin <validate-package|load-runtime|load-runtime-dir> [--package_dir <dir>] [--plugins_root <dir>]
+                 plugin <validate-package|verify-trust|load-runtime|load-runtime-dir> [--package_dir <dir>] [--plugins_root <dir>] [--require_trust true] [--allow_untrusted true]
                """;
     }
 

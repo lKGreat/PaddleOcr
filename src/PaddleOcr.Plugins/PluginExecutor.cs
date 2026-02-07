@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using PaddleOcr.Core.Cli;
@@ -15,8 +16,9 @@ public sealed class PluginExecutor : ICommandExecutor
             var packageDir = context.Options.TryGetValue("--package_dir", out var path) && !string.IsNullOrWhiteSpace(path)
                 ? path
                 : Directory.GetCurrentDirectory();
+            var requireTrust = ParseBool(context, "--require_trust");
 
-            var result = PluginPackageValidator.Validate(packageDir);
+            var result = PluginPackageValidator.Validate(packageDir, requireTrust);
             if (!result.Valid)
             {
                 return Task.FromResult(CommandResult.Fail("plugin validate-package failed:\n" + string.Join('\n', result.Errors)));
@@ -25,14 +27,29 @@ public sealed class PluginExecutor : ICommandExecutor
             return Task.FromResult(CommandResult.Ok($"plugin validate-package passed: {packageDir} ({result.Manifest!.Name}@{result.Manifest.Version})"));
         }
 
+        if (subCommand.Equals("verify-trust", StringComparison.OrdinalIgnoreCase))
+        {
+            var packageDir = context.Options.TryGetValue("--package_dir", out var path) && !string.IsNullOrWhiteSpace(path)
+                ? path
+                : Directory.GetCurrentDirectory();
+            var result = PluginPackageValidator.Validate(packageDir, requireTrust: true);
+            if (!result.Valid)
+            {
+                return Task.FromResult(CommandResult.Fail("plugin verify-trust failed:\n" + string.Join('\n', result.Errors)));
+            }
+
+            return Task.FromResult(CommandResult.Ok($"plugin verify-trust passed: {packageDir}"));
+        }
+
         if (subCommand.Equals("load-runtime", StringComparison.OrdinalIgnoreCase))
         {
             if (!context.Options.TryGetValue("--package_dir", out var packageDir) || string.IsNullOrWhiteSpace(packageDir))
             {
                 return Task.FromResult(CommandResult.Fail("plugin load-runtime requires --package_dir"));
             }
+            var allowUntrusted = ParseBool(context, "--allow_untrusted");
 
-            var loaded = PluginRuntimeLoader.LoadPackage(packageDir, out var message);
+            var loaded = PluginRuntimeLoader.LoadPackage(packageDir, out var message, requireTrust: !allowUntrusted);
             return Task.FromResult(loaded
                 ? CommandResult.Ok($"plugin load-runtime passed: {message}")
                 : CommandResult.Fail($"plugin load-runtime failed: {message}"));
@@ -44,8 +61,9 @@ public sealed class PluginExecutor : ICommandExecutor
             {
                 return Task.FromResult(CommandResult.Fail("plugin load-runtime-dir requires --plugins_root"));
             }
+            var allowUntrusted = ParseBool(context, "--allow_untrusted");
 
-            var summary = PluginRuntimeLoader.LoadDirectory(pluginsRoot);
+            var summary = PluginRuntimeLoader.LoadDirectory(pluginsRoot, requireTrust: !allowUntrusted);
             if (summary.Failed > 0)
             {
                 return Task.FromResult(CommandResult.Fail($"plugin load-runtime-dir failed: loaded={summary.Loaded}, failed={summary.Failed}\n{string.Join('\n', summary.Messages)}"));
@@ -54,7 +72,14 @@ public sealed class PluginExecutor : ICommandExecutor
             return Task.FromResult(CommandResult.Ok($"plugin load-runtime-dir passed: loaded={summary.Loaded}, failed={summary.Failed}"));
         }
 
-        return Task.FromResult(CommandResult.Fail("plugin supports: validate-package | load-runtime | load-runtime-dir"));
+        return Task.FromResult(CommandResult.Fail("plugin supports: validate-package | verify-trust | load-runtime | load-runtime-dir"));
+    }
+
+    private static bool ParseBool(PaddleOcr.Core.Cli.ExecutionContext context, string key)
+    {
+        return context.Options.TryGetValue(key, out var value)
+               && bool.TryParse(value, out var flag)
+               && flag;
     }
 }
 
@@ -62,9 +87,9 @@ public static class PluginRuntimeLoader
 {
     private static readonly PluginFaultIsolationPolicy FaultPolicy = PluginFaultIsolationPolicy.FailOpenWithFallback;
 
-    public static bool LoadPackage(string packageDir, out string message)
+    public static bool LoadPackage(string packageDir, out string message, bool requireTrust = true)
     {
-        var validation = PluginPackageValidator.Validate(packageDir);
+        var validation = PluginPackageValidator.Validate(packageDir, requireTrust);
         if (!validation.Valid || validation.Manifest is null)
         {
             message = string.Join("; ", validation.Errors);
@@ -105,7 +130,7 @@ public static class PluginRuntimeLoader
         return RegisterInstance(manifest, bindingName, instance, out message);
     }
 
-    public static PluginLoadSummary LoadDirectory(string pluginsRoot)
+    public static PluginLoadSummary LoadDirectory(string pluginsRoot, bool requireTrust = true)
     {
         if (!Directory.Exists(pluginsRoot))
         {
@@ -118,7 +143,7 @@ public static class PluginRuntimeLoader
         var messages = new List<string>();
         foreach (var dir in dirs)
         {
-            var ok = LoadPackage(dir, out var msg);
+            var ok = LoadPackage(dir, out var msg, requireTrust);
             if (ok)
             {
                 loaded++;
@@ -348,7 +373,7 @@ public interface IPluginLifecycleHooks
 
 public static class PluginPackageValidator
 {
-    public static PluginValidationResult Validate(string packageDir)
+    public static PluginValidationResult Validate(string packageDir, bool requireTrust = false)
     {
         var errors = new List<string>();
         if (!Directory.Exists(packageDir))
@@ -419,6 +444,8 @@ public static class PluginPackageValidator
             errors.Add($"unsupported schema_version: {manifest.SchemaVersion} (expected 1.x)");
         }
 
+        ValidateTrust(manifest, packageDir, useAlias, requireTrust, errors);
+
         if (!useAlias && !string.IsNullOrWhiteSpace(manifest.EntryAssembly))
         {
             var assemblyPath = Path.Combine(packageDir, manifest.EntryAssembly);
@@ -443,12 +470,100 @@ public static class PluginPackageValidator
         return new PluginValidationResult(errors.Count == 0, manifest, errors);
     }
 
+    private static void ValidateTrust(
+        PluginManifest manifest,
+        string packageDir,
+        bool useAlias,
+        bool requireTrust,
+        ICollection<string> errors)
+    {
+        if (manifest.Trust is null)
+        {
+            if (requireTrust)
+            {
+                errors.Add("missing trust metadata: trust");
+            }
+
+            return;
+        }
+
+        var trust = manifest.Trust;
+        if (!string.IsNullOrWhiteSpace(trust.Algorithm) &&
+            !trust.Algorithm.Equals("sha256", StringComparison.OrdinalIgnoreCase))
+        {
+            errors.Add($"unsupported trust algorithm: {trust.Algorithm} (expected sha256)");
+        }
+
+        if (trust.TrustLevel is not null)
+        {
+            var levels = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "verified", "internal", "untrusted"
+            };
+            if (!levels.Contains(trust.TrustLevel))
+            {
+                errors.Add($"unsupported trust_level: {trust.TrustLevel}");
+            }
+        }
+
+        if (!useAlias && !string.IsNullOrWhiteSpace(manifest.EntryAssembly))
+        {
+            var entry = Path.Combine(packageDir, manifest.EntryAssembly);
+            if (File.Exists(entry))
+            {
+                if (requireTrust && string.IsNullOrWhiteSpace(trust.EntryAssemblySha256))
+                {
+                    errors.Add("missing trust.entry_assembly_sha256");
+                }
+                else if (!string.IsNullOrWhiteSpace(trust.EntryAssemblySha256))
+                {
+                    var actual = ComputeSha256(entry);
+                    if (!actual.Equals(NormalizeHex(trust.EntryAssemblySha256), StringComparison.OrdinalIgnoreCase))
+                    {
+                        errors.Add("trust hash mismatch: entry_assembly_sha256");
+                    }
+                }
+            }
+        }
+
+        if (trust.FilesSha256 is { Count: > 0 })
+        {
+            foreach (var pair in trust.FilesSha256)
+            {
+                var full = Path.Combine(packageDir, pair.Key);
+                if (!File.Exists(full))
+                {
+                    errors.Add($"trust file not found: {full}");
+                    continue;
+                }
+
+                var actual = ComputeSha256(full);
+                if (!actual.Equals(NormalizeHex(pair.Value), StringComparison.OrdinalIgnoreCase))
+                {
+                    errors.Add($"trust hash mismatch: {pair.Key}");
+                }
+            }
+        }
+    }
+
     private static void ValidateRequired(string? value, string name, ICollection<string> errors)
     {
         if (string.IsNullOrWhiteSpace(value))
         {
             errors.Add($"missing required field: {name}");
         }
+    }
+
+    private static string ComputeSha256(string filePath)
+    {
+        using var stream = File.OpenRead(filePath);
+        var hash = SHA256.HashData(stream);
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private static string NormalizeHex(string value)
+    {
+        return value.Replace("-", string.Empty, StringComparison.Ordinal).Trim().ToLowerInvariant();
     }
 }
 
@@ -486,4 +601,25 @@ public sealed class PluginManifest
 
     [JsonPropertyName("alias_of")]
     public string? AliasOf { get; set; }
+
+    [JsonPropertyName("trust")]
+    public PluginTrustMetadata? Trust { get; set; }
+}
+
+public sealed class PluginTrustMetadata
+{
+    [JsonPropertyName("algorithm")]
+    public string? Algorithm { get; set; }
+
+    [JsonPropertyName("entry_assembly_sha256")]
+    public string? EntryAssemblySha256 { get; set; }
+
+    [JsonPropertyName("files_sha256")]
+    public Dictionary<string, string>? FilesSha256 { get; set; }
+
+    [JsonPropertyName("signer")]
+    public string? Signer { get; set; }
+
+    [JsonPropertyName("trust_level")]
+    public string? TrustLevel { get; set; }
 }

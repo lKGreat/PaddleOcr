@@ -65,4 +65,12 @@ public sealed class CommandLineTests
         cmd.Sub.Should().Be("load-runtime");
         cmd.Options["--package_dir"].Should().Be("./plugins/p1");
     }
+
+    [Fact]
+    public void Parse_Should_Read_Plugin_VerifyTrust_Subcommand()
+    {
+        var cmd = CommandLine.Parse(["plugin", "verify-trust", "--package_dir", "./plugins/p2"]);
+        cmd.Sub.Should().Be("verify-trust");
+        cmd.Options["--package_dir"].Should().Be("./plugins/p2");
+    }
 }
