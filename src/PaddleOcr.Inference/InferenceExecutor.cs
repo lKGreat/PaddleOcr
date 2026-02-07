@@ -52,6 +52,11 @@ public sealed class InferenceExecutor : ICommandExecutor
             return Task.FromResult(RunCls(context));
         }
 
+        if (subCommand.Equals("e2e", StringComparison.OrdinalIgnoreCase))
+        {
+            return Task.FromResult(RunE2e(context));
+        }
+
         context.Logger.LogInformation("Running infer {Mode}", subCommand);
         return Task.FromResult(CommandResult.Ok($"infer {subCommand} scaffold executed."));
     }
@@ -191,6 +196,48 @@ public sealed class InferenceExecutor : ICommandExecutor
             ParseFloat(GetOrDefault(context, "--cls_thresh", "0.9")));
         new ClsOnnxRunner().Run(options);
         return CommandResult.Ok($"infer cls completed. output={output}");
+    }
+
+    private static CommandResult RunE2e(PaddleOcr.Core.Cli.ExecutionContext context)
+    {
+        var imageDir = GetOrNull(context, "--image_dir");
+        var detModel = GetOrNull(context, "--det_model_dir");
+        var recModel = GetOrNull(context, "--rec_model_dir");
+        if (string.IsNullOrWhiteSpace(imageDir) || string.IsNullOrWhiteSpace(detModel) || string.IsNullOrWhiteSpace(recModel))
+        {
+            return CommandResult.Fail("infer e2e requires --image_dir, --det_model_dir and --rec_model_dir");
+        }
+
+        if (!ParseBool(GetOrDefault(context, "--use_onnx", "false")))
+        {
+            return CommandResult.Fail("infer e2e currently supports --use_onnx=true only.");
+        }
+
+        if (!File.Exists(detModel))
+        {
+            return CommandResult.Fail($"det model not found: {detModel}");
+        }
+
+        if (!File.Exists(recModel))
+        {
+            return CommandResult.Fail($"rec model not found: {recModel}");
+        }
+
+        var output = GetOrDefault(context, "--draw_img_save_dir", "./inference_results");
+        var options = new SystemOnnxOptions(
+            imageDir,
+            recModel,
+            detModel,
+            GetOrNull(context, "--cls_model_dir"),
+            output,
+            GetOrNull(context, "--rec_char_dict_path"),
+            ParseBool(GetOrDefault(context, "--use_space_char", "true")),
+            ParseCsv(GetOrDefault(context, "--label_list", "0,180")),
+            ParseFloat(GetOrDefault(context, "--drop_score", "0.5")),
+            ParseFloat(GetOrDefault(context, "--cls_thresh", "0.9")),
+            ParseFloat(GetOrDefault(context, "--det_db_thresh", "0.3")));
+        new SystemOnnxRunner().Run(options);
+        return CommandResult.Ok($"infer e2e completed. output={output}");
     }
 
     private static string? GetOrNull(PaddleOcr.Core.Cli.ExecutionContext context, string key)
