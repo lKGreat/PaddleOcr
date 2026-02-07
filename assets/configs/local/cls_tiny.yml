@@ -1,0 +1,35 @@
+Global:
+  use_gpu: false
+  epoch_num: 1
+  save_model_dir: ./output/tiny_cls
+  checkpoints:
+
+Architecture:
+  model_type: cls
+
+Optimizer:
+  lr:
+    learning_rate: 0.001
+
+Train:
+  dataset:
+    data_dir: ../../samples/tiny_cls
+    label_file_list:
+      - ../../samples/tiny_cls/train.txt
+    transforms:
+      - ClsResizeImg:
+          image_shape: [3, 48, 192]
+  loader:
+    batch_size_per_card: 2
+
+Eval:
+  dataset:
+    data_dir: ../../samples/tiny_cls
+    label_file_list:
+      - ../../samples/tiny_cls/test.txt
+    transforms:
+      - ClsResizeImg:
+          image_shape: [3, 48, 192]
+  loader:
+    batch_size_per_card: 2
+

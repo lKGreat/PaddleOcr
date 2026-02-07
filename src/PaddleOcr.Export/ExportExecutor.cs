@@ -26,7 +26,34 @@ public sealed class ExportExecutor : ICommandExecutor
             return Task.FromResult(CommandResult.Fail($"{subCommand} requires -c/--config"));
         }
 
-        context.Logger.LogInformation("Running {Command}", subCommand);
-        return Task.FromResult(CommandResult.Ok($"{subCommand} pipeline scaffold executed."));
+        try
+        {
+            var exporter = new NativeExporter(context.Logger);
+            if (subCommand.Equals("convert:json2pdmodel", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!context.Options.TryGetValue("--json_model_dir", out var jsonDir) ||
+                    !context.Options.TryGetValue("--output_dir", out var outputDir))
+                {
+                    return Task.FromResult(CommandResult.Fail("convert json2pdmodel requires --json_model_dir and --output_dir"));
+                }
+
+                exporter.ConvertJsonToPdmodel(jsonDir, outputDir);
+                return Task.FromResult(CommandResult.Ok($"convert:json2pdmodel completed. output={outputDir}"));
+            }
+
+            var cfg = new ExportConfigView(context.Config, context.ConfigPath!);
+            if (subCommand.Equals("export-onnx", StringComparison.OrdinalIgnoreCase))
+            {
+                var outFile = exporter.ExportOnnx(cfg);
+                return Task.FromResult(CommandResult.Ok($"export-onnx completed. output={outFile}"));
+            }
+
+            var native = exporter.ExportNative(cfg);
+            return Task.FromResult(CommandResult.Ok($"{subCommand} completed. output={native}"));
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(CommandResult.Fail($"{subCommand} failed: {ex.Message}"));
+        }
     }
 }

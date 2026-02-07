@@ -7,6 +7,12 @@
     <ProjectReference Include="..\PaddleOcr.Models\PaddleOcr.Models.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
+    <PackageReference Include="TorchSharp" Version="0.105.2" />
+    <PackageReference Include="TorchSharp-cpu" Version="0.105.2" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>

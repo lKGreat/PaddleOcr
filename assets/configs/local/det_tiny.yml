@@ -1,0 +1,35 @@
+Global:
+  use_gpu: false
+  epoch_num: 1
+  save_model_dir: ./output/tiny_det
+  checkpoints:
+
+Architecture:
+  model_type: det
+
+Optimizer:
+  lr:
+    learning_rate: 0.001
+
+Train:
+  dataset:
+    data_dir: ../../samples/tiny_det
+    label_file_list:
+      - ../../samples/tiny_det/train.txt
+    transforms:
+      - ResizeTextImg:
+          size: 128
+  loader:
+    batch_size_per_card: 2
+
+Eval:
+  dataset:
+    data_dir: ../../samples/tiny_det
+    label_file_list:
+      - ../../samples/tiny_det/test.txt
+    transforms:
+      - ResizeTextImg:
+          size: 128
+  loader:
+    batch_size_per_card: 2
+
