@@ -27,7 +27,7 @@ internal sealed class SimpleDetTrainer
         var rng = new Random(1024);
         Directory.CreateDirectory(cfg.SaveModelDir);
 
-        float best = -1f;
+        float bestFscore = -1f;
         for (var epoch = 1; epoch <= cfg.EpochNum; epoch++)
         {
             model.train();
@@ -46,18 +46,20 @@ internal sealed class SimpleDetTrainer
                 samples += batch;
             }
 
-            var evalIou = Evaluate(model, evalSet, cfg.EvalBatchSize, size, dev);
-            if (evalIou > best)
+            var metrics = Evaluate(model, evalSet, cfg.EvalBatchSize, size, dev);
+            if (metrics.Fscore > bestFscore)
             {
-                best = evalIou;
+                bestFscore = metrics.Fscore;
                 model.save(Path.Combine(cfg.SaveModelDir, "best.pt"));
             }
 
             model.save(Path.Combine(cfg.SaveModelDir, "latest.pt"));
-            _logger.LogInformation("epoch={Epoch}/{Total} train_loss={Loss:F4} eval_iou={IoU:F4}", epoch, cfg.EpochNum, lossSum / Math.Max(1, samples), evalIou);
+            _logger.LogInformation(
+                "epoch={Epoch}/{Total} train_loss={Loss:F4} eval_p={P:F4} eval_r={R:F4} eval_f={F:F4} eval_iou={IoU:F4}",
+                epoch, cfg.EpochNum, lossSum / Math.Max(1, samples), metrics.Precision, metrics.Recall, metrics.Fscore, metrics.Iou);
         }
 
-        var summary = new TrainingSummary(cfg.EpochNum, best, cfg.SaveModelDir);
+        var summary = new TrainingSummary(cfg.EpochNum, bestFscore, cfg.SaveModelDir);
         Directory.CreateDirectory(cfg.SaveModelDir);
         File.WriteAllText(Path.Combine(cfg.SaveModelDir, "train_result.json"), System.Text.Json.JsonSerializer.Serialize(summary));
         return summary;
@@ -80,15 +82,24 @@ internal sealed class SimpleDetTrainer
             model.load(ckpt);
         }
 
-        var iou = Evaluate(model, evalSet, cfg.EvalBatchSize, size, dev);
-        return new EvaluationSummary(iou, evalSet.Count);
+        var metrics = Evaluate(model, evalSet, cfg.EvalBatchSize, size, dev);
+        Directory.CreateDirectory(cfg.SaveModelDir);
+        File.WriteAllText(
+            Path.Combine(cfg.SaveModelDir, "eval_result.json"),
+            System.Text.Json.JsonSerializer.Serialize(metrics, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        _logger.LogInformation(
+            "det eval metrics: precision={P:F4}, recall={R:F4}, fscore={F:F4}, iou={IoU:F4}",
+            metrics.Precision, metrics.Recall, metrics.Fscore, metrics.Iou);
+        return new EvaluationSummary(metrics.Iou, evalSet.Count);
     }
 
-    private static float Evaluate(SimpleDetNet model, SimpleDetDataset evalSet, int batchSize, int size, Device dev)
+    private static DetEvalMetrics Evaluate(SimpleDetNet model, SimpleDetDataset evalSet, int batchSize, int size, Device dev)
     {
         model.eval();
         var interSum = 0f;
         var unionSum = 0f;
+        var predSum = 0f;
+        var gtSum = 0f;
         using var noGrad = torch.no_grad();
         foreach (var (images, masks, batch) in evalSet.GetBatches(batchSize, false, new Random(7)))
         {
@@ -99,11 +110,19 @@ internal sealed class SimpleDetTrainer
             using var yb = y.gt(0.5);
             using var inter = pb.logical_and(yb).sum();
             using var union = pb.logical_or(yb).sum();
+            using var predArea = pb.sum();
+            using var gtArea = yb.sum();
             interSum += inter.ToSingle();
             unionSum += union.ToSingle();
+            predSum += predArea.ToSingle();
+            gtSum += gtArea.ToSingle();
         }
 
-        return unionSum <= 0f ? 0f : interSum / unionSum;
+        var iou = unionSum <= 0f ? 0f : interSum / unionSum;
+        var precision = predSum <= 0f ? 0f : interSum / predSum;
+        var recall = gtSum <= 0f ? 0f : interSum / gtSum;
+        var f = precision + recall <= 0f ? 0f : 2f * precision * recall / (precision + recall);
+        return new DetEvalMetrics(precision, recall, f, iou);
     }
 }
 
@@ -132,3 +151,5 @@ internal sealed class SimpleDetNet : Module<Tensor, Tensor>
         return _head.call(feat);
     }
 }
+
+internal sealed record DetEvalMetrics(float Precision, float Recall, float Fscore, float Iou);

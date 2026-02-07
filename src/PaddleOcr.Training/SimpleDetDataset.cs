@@ -71,8 +71,15 @@ internal sealed class SimpleDetDataset
         var mask = new float[_size * _size];
         foreach (var poly in sample.Polygons)
         {
-            var xs = poly.Select(p => p[0] * _size / Math.Max(1, srcW)).ToArray();
-            var ys = poly.Select(p => p[1] * _size / Math.Max(1, srcH)).ToArray();
+            var scaled = poly
+                .Select(p => new[]
+                {
+                    Math.Clamp(p[0] * _size / Math.Max(1, srcW), 0, _size - 1),
+                    Math.Clamp(p[1] * _size / Math.Max(1, srcH), 0, _size - 1)
+                })
+                .ToArray();
+            var xs = scaled.Select(p => p[0]).ToArray();
+            var ys = scaled.Select(p => p[1]).ToArray();
             var x1 = Math.Clamp(xs.Min(), 0, _size - 1);
             var y1 = Math.Clamp(ys.Min(), 0, _size - 1);
             var x2 = Math.Clamp(xs.Max(), 0, _size - 1);
@@ -81,12 +88,36 @@ internal sealed class SimpleDetDataset
             {
                 for (var x = x1; x <= x2; x++)
                 {
-                    mask[y * _size + x] = 1f;
+                    if (PointInPolygon(x + 0.5f, y + 0.5f, scaled))
+                    {
+                        mask[y * _size + x] = 1f;
+                    }
                 }
             }
         }
 
         return (imageData, mask);
+    }
+
+    private static bool PointInPolygon(float x, float y, int[][] poly)
+    {
+        var inside = false;
+        for (var i = 0; i < poly.Length; i++)
+        {
+            var j = (i + poly.Length - 1) % poly.Length;
+            var xi = poly[i][0];
+            var yi = poly[i][1];
+            var xj = poly[j][0];
+            var yj = poly[j][1];
+            var intersect = ((yi > y) != (yj > y))
+                            && (x < (xj - xi) * (y - yi) / (yj - yi + 1e-6f) + xi);
+            if (intersect)
+            {
+                inside = !inside;
+            }
+        }
+
+        return inside;
     }
 
     private static List<DetSample> LoadSamples(string labelFile, string dataDir)
@@ -173,4 +204,3 @@ internal sealed class SimpleDetDataset
 }
 
 internal sealed record DetSample(string ImagePath, List<int[][]> Polygons);
-

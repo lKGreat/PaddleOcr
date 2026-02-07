@@ -28,6 +28,10 @@ public sealed class NativeExporter
             format = "torchsharp-native",
             model_type = cfg.ModelType,
             checkpoint = ckpt,
+            labels = cfg.LabelList,
+            rec_char_dict_path = cfg.RecCharDictPath,
+            cls_image_shape = cfg.ClsImageShape,
+            det_input_size = cfg.DetInputSize,
             exported_at = DateTime.UtcNow
         });
         _logger.LogInformation("Exported native model: {Path}", target);
@@ -50,6 +54,10 @@ public sealed class NativeExporter
             format = "onnx",
             model_type = cfg.ModelType,
             source = onnx,
+            labels = cfg.LabelList,
+            rec_char_dict_path = cfg.RecCharDictPath,
+            cls_image_shape = cfg.ClsImageShape,
+            det_input_size = cfg.DetInputSize,
             exported_at = DateTime.UtcNow
         });
         _logger.LogInformation("Exported ONNX model: {Path}", target);

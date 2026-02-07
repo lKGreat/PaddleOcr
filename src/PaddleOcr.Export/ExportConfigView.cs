@@ -18,6 +18,8 @@ public sealed class ExportConfigView
     public string? PretrainedModel => ResolvePathOrNull(GetStringOrNull("Global.pretrained_model"));
     public IReadOnlyList<string> LabelList => GetStringList("Global.label_list");
     public string? RecCharDictPath => ResolvePathOrNull(GetStringOrNull("Global.rec_char_dict_path"));
+    public int DetInputSize => GetDetInputSize();
+    public IReadOnlyList<int> ClsImageShape => GetClsImageShape();
 
     private object? GetByPath(string path)
     {
@@ -45,6 +47,7 @@ public sealed class ExportConfigView
 
     private string GetString(string path, string fallback) => GetByPath(path)?.ToString() ?? fallback;
     private string? GetStringOrNull(string path) => GetByPath(path)?.ToString();
+    private int GetInt(string path, int fallback) => int.TryParse(GetByPath(path)?.ToString(), out var v) ? v : fallback;
 
     private IReadOnlyList<string> GetStringList(string path)
     {
@@ -54,6 +57,48 @@ public sealed class ExportConfigView
         }
 
         return [];
+    }
+
+    private int GetDetInputSize()
+    {
+        if (GetByPath("Train.dataset.transforms") is not List<object?> transforms)
+        {
+            return 640;
+        }
+
+        foreach (var item in transforms)
+        {
+            if (item is Dictionary<string, object?> op &&
+                op.TryGetValue("ResizeTextImg", out var cfgObj) &&
+                cfgObj is Dictionary<string, object?> cfg)
+            {
+                return int.TryParse(cfg.GetValueOrDefault("size")?.ToString(), out var v) ? v : 640;
+            }
+        }
+
+        return 640;
+    }
+
+    private IReadOnlyList<int> GetClsImageShape()
+    {
+        if (GetByPath("Train.dataset.transforms") is not List<object?> transforms)
+        {
+            return [3, 48, 192];
+        }
+
+        foreach (var item in transforms)
+        {
+            if (item is Dictionary<string, object?> op &&
+                op.TryGetValue("ClsResizeImg", out var cfgObj) &&
+                cfgObj is Dictionary<string, object?> cfg &&
+                cfg.TryGetValue("image_shape", out var listObj) &&
+                listObj is List<object?> list)
+            {
+                return list.Where(x => x is not null).Select(x => int.TryParse(x!.ToString(), out var v) ? v : 0).ToList();
+            }
+        }
+
+        return [3, 48, 192];
     }
 
     private string ResolvePath(string path) => Path.IsPathRooted(path) ? path : Path.GetFullPath(Path.Combine(_configDir, path));

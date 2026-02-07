@@ -30,6 +30,9 @@ hubserving_result/
 debug/
 tmp/
 temp/
+assets/configs/local/output/
+assets/configs/local/infer_*/
+assets/samples/pdmodel_shim/
 
 # Model and dataset artifacts
 *.pdparams
@@ -53,3 +56,6 @@ data/
 # Package cache
 *.nupkg
 packages/
+
+# Local agent/control files
+AGENTS.md

@@ -92,6 +92,10 @@ internal sealed class SimpleClsTrainer
 
         var acc = Evaluate(model, evalSet, cfg.EvalBatchSize, shape.H, shape.W, dev);
         var summary = new EvaluationSummary(acc, evalSet.Count);
+        Directory.CreateDirectory(cfg.SaveModelDir);
+        File.WriteAllText(
+            Path.Combine(cfg.SaveModelDir, "eval_result.json"),
+            JsonSerializer.Serialize(new { accuracy = acc, samples = evalSet.Count }, new JsonSerializerOptions { WriteIndented = true }));
         _logger.LogInformation("eval_acc={EvalAcc:F4} samples={Samples}", summary.Accuracy, summary.Samples);
         return summary;
     }
