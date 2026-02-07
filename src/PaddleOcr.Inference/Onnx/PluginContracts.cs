@@ -1,4 +1,5 @@
 using Microsoft.ML.OnnxRuntime.Tensors;
+using PaddleOcr.Models;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 

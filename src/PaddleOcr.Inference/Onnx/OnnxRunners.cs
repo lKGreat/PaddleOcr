@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Diagnostics;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
+using PaddleOcr.Models;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Drawing.Processing;
 using SixLabors.ImageSharp.PixelFormats;
@@ -31,27 +32,11 @@ public sealed class DetOnnxRunner
         foreach (var file in imageFiles)
         {
             using var img = Image.Load<Rgb24>(file);
-            var (inputWidth, inputHeight) = DetInferenceExtensions.ResolveDetInputSize(options, img.Width, img.Height, inputDims);
-            var totalWatch = Stopwatch.StartNew();
-            var profiled = OnnxRuntimeUtils.RunSessionProfiled(det, img, inputHeight, inputWidth, inputBuilderName);
-            var outputs = profiled.Outputs;
-            var postWatch = Stopwatch.StartNew();
-            var boxes = outputs.Count == 0
-                ? [PostprocessUtils.FullImageBox(img.Width, img.Height)]
-                : DetInferenceExtensions.DecodeBoxes(options, outputs, img.Width, img.Height);
-            var sorted = PostprocessUtils.SortBoxes(boxes.Count == 0 ? [PostprocessUtils.FullImageBox(img.Width, img.Height)] : boxes);
-            postWatch.Stop();
-            totalWatch.Stop();
+            var (sorted, profile) = options.UseSlice
+                ? PredictWithSlice(options, det, img, inputDims, inputBuilderName)
+                : PredictSingle(options, det, img, inputDims, inputBuilderName);
             var imageName = Path.GetFileName(file);
-            runtimeByImage[imageName] = new DetRuntimeProfile(
-                profiled.PreprocessMs,
-                profiled.InferenceMs,
-                postWatch.Elapsed.TotalMilliseconds,
-                totalWatch.Elapsed.TotalMilliseconds,
-                img.Width,
-                img.Height,
-                inputWidth,
-                inputHeight);
+            runtimeByImage[imageName] = profile;
             var payload = sorted.Select(b => new { transcription = "", points = b.Points }).ToList();
             lines.Add($"{imageName}\t{JsonSerializer.Serialize(payload)}");
             predictionByImage[imageName] = sorted;
@@ -69,6 +54,250 @@ public sealed class DetOnnxRunner
 
         File.WriteAllLines(resultPath, lines);
         DetInferenceExtensions.WriteDetMetrics(options, options.OutputDir, predictionByImage, runtimeByImage);
+    }
+
+    private static (List<OcrBox> Boxes, DetRuntimeProfile Profile) PredictSingle(
+        DetOnnxOptions options,
+        InferenceSession det,
+        Image<Rgb24> image,
+        IReadOnlyList<int> inputDims,
+        string inputBuilderName)
+    {
+        var (inputWidth, inputHeight) = DetInferenceExtensions.ResolveDetInputSize(options, image.Width, image.Height, inputDims);
+        var totalWatch = Stopwatch.StartNew();
+        var profiled = OnnxRuntimeUtils.RunSessionProfiled(det, image, inputHeight, inputWidth, inputBuilderName);
+        var outputs = profiled.Outputs;
+        var postWatch = Stopwatch.StartNew();
+        var boxes = outputs.Count == 0
+            ? [PostprocessUtils.FullImageBox(image.Width, image.Height)]
+            : DetInferenceExtensions.DecodeBoxes(options, outputs, image.Width, image.Height);
+        var sorted = PostprocessUtils.SortBoxes(boxes.Count == 0 ? [PostprocessUtils.FullImageBox(image.Width, image.Height)] : boxes);
+        postWatch.Stop();
+        totalWatch.Stop();
+        return (
+            sorted,
+            new DetRuntimeProfile(
+                profiled.PreprocessMs,
+                profiled.InferenceMs,
+                postWatch.Elapsed.TotalMilliseconds,
+                totalWatch.Elapsed.TotalMilliseconds,
+                image.Width,
+                image.Height,
+                inputWidth,
+                inputHeight));
+    }
+
+    private static (List<OcrBox> Boxes, DetRuntimeProfile Profile) PredictWithSlice(
+        DetOnnxOptions options,
+        InferenceSession det,
+        Image<Rgb24> image,
+        IReadOnlyList<int> inputDims,
+        string inputBuilderName)
+    {
+        var limit = Math.Max(32, options.DetLimitSideLen);
+        var ratioH = image.Width == 0 ? 0f : image.Height / (float)image.Width;
+        var ratioW = image.Height == 0 ? 0f : image.Width / (float)image.Height;
+        if (!(ratioH > 2f && image.Height > limit) && !(ratioW > 3f && image.Width > limit * 3))
+        {
+            return PredictSingle(options, det, image, inputDims, inputBuilderName);
+        }
+
+        var minBoundDistance = Math.Max(1, options.SliceMinBoundDistance);
+        var merged = new List<OcrBox>();
+        var preprocessMs = 0d;
+        var inferenceMs = 0d;
+        var postprocessMs = 0d;
+        var totalMs = 0d;
+        var (baseInputW, baseInputH) = DetInferenceExtensions.ResolveDetInputSize(options, image.Width, image.Height, inputDims);
+
+        if (ratioH > 2f && image.Height > limit)
+        {
+            var startH = 0;
+            var endH = 0;
+            while (endH <= image.Height)
+            {
+                endH = startH + image.Width * 3 / 4;
+                var cropHeight = Math.Min(endH, image.Height) - startH;
+                if (cropHeight <= 0)
+                {
+                    break;
+                }
+
+                using var sub = image.Clone(x => x.Crop(new Rectangle(0, startH, image.Width, cropHeight)));
+                var (subBoxes, subProfile) = PredictSingle(options, det, sub, inputDims, inputBuilderName);
+                preprocessMs += subProfile.PreprocessMs;
+                inferenceMs += subProfile.InferenceMs;
+                postprocessMs += subProfile.PostprocessMs;
+                totalMs += subProfile.TotalMs;
+                var offset = startH;
+
+                if (subBoxes.Count == 0 || image.Width - subBoxes.Max(MaxPointY) > minBoundDistance)
+                {
+                    startH = endH;
+                }
+                else
+                {
+                    subBoxes = subBoxes.OrderBy(GetBoxPoint2Y).ToList();
+                    var bottomLine = subBoxes.Count <= 1 ? 0 : subBoxes.Take(subBoxes.Count - 1).Max(GetBoxPoint2Y);
+                    if (bottomLine > 0)
+                    {
+                        startH += bottomLine;
+                        subBoxes = subBoxes.Where(x => GetBoxPoint2Y(x) <= bottomLine).ToList();
+                    }
+                    else
+                    {
+                        startH = endH;
+                    }
+                }
+
+                merged.AddRange(subBoxes.Select(x => OffsetBox(x, 0, offset, image.Width, image.Height)));
+            }
+        }
+        else
+        {
+            var startW = 0;
+            var endW = 0;
+            while (endW <= image.Width)
+            {
+                endW = startW + image.Height * 3 / 4;
+                var cropWidth = Math.Min(endW, image.Width) - startW;
+                if (cropWidth <= 0)
+                {
+                    break;
+                }
+
+                using var sub = image.Clone(x => x.Crop(new Rectangle(startW, 0, cropWidth, image.Height)));
+                var (subBoxes, subProfile) = PredictSingle(options, det, sub, inputDims, inputBuilderName);
+                preprocessMs += subProfile.PreprocessMs;
+                inferenceMs += subProfile.InferenceMs;
+                postprocessMs += subProfile.PostprocessMs;
+                totalMs += subProfile.TotalMs;
+                var offset = startW;
+
+                if (subBoxes.Count == 0 || image.Height - subBoxes.Max(MaxPointX) > minBoundDistance)
+                {
+                    startW = endW;
+                }
+                else
+                {
+                    subBoxes = subBoxes.OrderBy(GetBoxPoint2X).ToList();
+                    var rightLine = subBoxes.Count <= 1 ? 0 : subBoxes.Take(subBoxes.Count - 1).Max(GetBoxPoint2X);
+                    if (rightLine > 0)
+                    {
+                        startW += rightLine;
+                        subBoxes = subBoxes.Where(x => GetBoxPoint2X(x) <= rightLine).ToList();
+                    }
+                    else
+                    {
+                        startW = endW;
+                    }
+                }
+
+                merged.AddRange(subBoxes.Select(x => OffsetBox(x, offset, 0, image.Width, image.Height)));
+            }
+        }
+
+        if (merged.Count == 0)
+        {
+            merged.Add(PostprocessUtils.FullImageBox(image.Width, image.Height));
+        }
+
+        merged = SuppressByIou(merged, options.SliceMergeIou);
+        var sorted = PostprocessUtils.SortBoxes(merged);
+        var profile = new DetRuntimeProfile(
+            preprocessMs,
+            inferenceMs,
+            postprocessMs,
+            totalMs,
+            image.Width,
+            image.Height,
+            baseInputW,
+            baseInputH);
+        return (sorted, profile);
+    }
+
+    private static OcrBox OffsetBox(OcrBox box, int offsetX, int offsetY, int width, int height)
+    {
+        var points = box.Points
+            .Select(p => new[]
+            {
+                Math.Clamp(p[0] + offsetX, 0, Math.Max(0, width - 1)),
+                Math.Clamp(p[1] + offsetY, 0, Math.Max(0, height - 1))
+            })
+            .ToArray();
+        return new OcrBox(points);
+    }
+
+    private static List<OcrBox> SuppressByIou(IReadOnlyList<OcrBox> boxes, float iouThreshold)
+    {
+        var threshold = Math.Clamp(iouThreshold, 0.01f, 0.99f);
+        var ordered = boxes.OrderByDescending(BoxArea).ToList();
+        var kept = new List<OcrBox>(ordered.Count);
+        foreach (var box in ordered)
+        {
+            var suppress = kept.Any(x => ComputeIou(x, box) >= threshold);
+            if (!suppress)
+            {
+                kept.Add(box);
+            }
+        }
+
+        return kept;
+    }
+
+    private static float BoxArea(OcrBox box)
+    {
+        var (x1, y1, x2, y2) = ToRect(box);
+        return Math.Max(1f, (x2 - x1 + 1f) * (y2 - y1 + 1f));
+    }
+
+    private static float ComputeIou(OcrBox a, OcrBox b)
+    {
+        var (ax1, ay1, ax2, ay2) = ToRect(a);
+        var (bx1, by1, bx2, by2) = ToRect(b);
+        var ix1 = Math.Max(ax1, bx1);
+        var iy1 = Math.Max(ay1, by1);
+        var ix2 = Math.Min(ax2, bx2);
+        var iy2 = Math.Min(ay2, by2);
+        if (ix2 <= ix1 || iy2 <= iy1)
+        {
+            return 0f;
+        }
+
+        var inter = (ix2 - ix1) * (iy2 - iy1);
+        var areaA = Math.Max(1f, (ax2 - ax1 + 1f) * (ay2 - ay1 + 1f));
+        var areaB = Math.Max(1f, (bx2 - bx1 + 1f) * (by2 - by1 + 1f));
+        var union = areaA + areaB - inter;
+        return union <= 0f ? 0f : inter / union;
+    }
+
+    private static (float X1, float Y1, float X2, float Y2) ToRect(OcrBox box)
+    {
+        var xs = box.Points.Select(p => (float)p[0]).ToArray();
+        var ys = box.Points.Select(p => (float)p[1]).ToArray();
+        return (xs.Min(), ys.Min(), xs.Max(), ys.Max());
+    }
+
+    private static int GetBoxPoint2Y(OcrBox box)
+    {
+        var idx = box.Points.Length <= 2 ? box.Points.Length - 1 : 2;
+        return idx < 0 ? 0 : box.Points[idx][1];
+    }
+
+    private static int GetBoxPoint2X(OcrBox box)
+    {
+        var idx = box.Points.Length <= 2 ? box.Points.Length - 1 : 2;
+        return idx < 0 ? 0 : box.Points[idx][0];
+    }
+
+    private static int MaxPointY(OcrBox box)
+    {
+        return box.Points.Length == 0 ? 0 : box.Points.Max(p => p[1]);
+    }
+
+    private static int MaxPointX(OcrBox box)
+    {
+        return box.Points.Length == 0 ? 0 : box.Points.Max(p => p[0]);
     }
 }
 
@@ -467,7 +696,12 @@ public sealed record DetOnnxOptions(
     int FceFourierDegree,
     string? DetGtLabelPath,
     float DetEvalIouThresh,
-    string? DetMetricsPath);
+    string? DetMetricsPath,
+    string DetDbScoreMode = "fast",
+    int DetMaxCandidates = 1000,
+    bool UseSlice = false,
+    float SliceMergeIou = 0.3f,
+    int SliceMinBoundDistance = 50);
 
 public sealed record RecOnnxOptions(
     string ImageDir,
@@ -523,7 +757,7 @@ public sealed record KieOnnxOptions(
 public sealed record OcrItem(string Transcription, int[][] Points, float Score);
 public sealed record OcrBox(int[][] Points);
 public sealed record ClsResult(string Label, float Score);
-public sealed record RecResult(string Text, float Score);
+// RecResult 已迁移到 PaddleOcr.Models.RecResult
 
 public static class CharsetLoader
 {
@@ -761,7 +995,9 @@ public static class PostprocessUtils
         float boxThresh = 0.6f,
         float unclipRatio = 1.5f,
         bool useDilation = false,
-        string boxType = "quad")
+        string boxType = "quad",
+        int maxCandidates = 1000,
+        string scoreMode = "fast")
     {
         var (rawMap, h, w) = ExtractMap(data, dims);
         var map = useDilation ? DilateMap(rawMap, h, w, thresh) : rawMap;
@@ -773,6 +1009,9 @@ public static class PostprocessUtils
         var visited = new bool[h * w];
         var boxes = new List<OcrBox>();
         var minArea = Math.Max(3, (h * w) / 2000);
+        var maxCount = Math.Max(1, maxCandidates);
+        var slowScoreMode = scoreMode.Equals("slow", StringComparison.OrdinalIgnoreCase);
+        var reachedLimit = false;
 
         for (var y = 0; y < h; y++)
         {
@@ -823,16 +1062,17 @@ public static class PostprocessUtils
                     continue;
                 }
 
-                var compScore = scoreSum / Math.Max(1, count);
-                if (compScore < boxThresh)
-                {
-                    continue;
-                }
-
                 var mapX1 = Math.Max(0, minX);
                 var mapY1 = Math.Max(0, minY);
                 var mapX2 = Math.Min(w - 1, maxX);
                 var mapY2 = Math.Min(h - 1, maxY);
+                var compScore = slowScoreMode
+                    ? ComputeRectAverage(rawMap, h, w, mapX1, mapY1, mapX2, mapY2)
+                    : scoreSum / Math.Max(1, count);
+                if (compScore < boxThresh)
+                {
+                    continue;
+                }
 
                 var x1 = mapX1 * imgW / w;
                 var y1 = mapY1 * imgH / h;
@@ -841,6 +1081,16 @@ public static class PostprocessUtils
 
                 var expanded = ExpandRect(x1, y1, x2, y2, imgW, imgH, unclipRatio);
                 boxes.Add(ToBox(expanded.X1, expanded.Y1, expanded.X2, expanded.Y2, boxType));
+                if (boxes.Count >= maxCount)
+                {
+                    reachedLimit = true;
+                    break;
+                }
+            }
+
+            if (reachedLimit)
+            {
+                break;
             }
         }
 
@@ -1023,6 +1273,26 @@ public static class PostprocessUtils
         }
 
         return result;
+    }
+
+    private static float ComputeRectAverage(float[] map, int h, int w, int x1, int y1, int x2, int y2)
+    {
+        var sx = Math.Clamp(Math.Min(x1, x2), 0, Math.Max(0, w - 1));
+        var ex = Math.Clamp(Math.Max(x1, x2), 0, Math.Max(0, w - 1));
+        var sy = Math.Clamp(Math.Min(y1, y2), 0, Math.Max(0, h - 1));
+        var ey = Math.Clamp(Math.Max(y1, y2), 0, Math.Max(0, h - 1));
+        var sum = 0f;
+        var count = 0;
+        for (var y = sy; y <= ey; y++)
+        {
+            for (var x = sx; x <= ex; x++)
+            {
+                sum += map[y * w + x];
+                count++;
+            }
+        }
+
+        return count == 0 ? 0f : sum / count;
     }
 
     private static (int X1, int Y1, int X2, int Y2) ExpandRect(

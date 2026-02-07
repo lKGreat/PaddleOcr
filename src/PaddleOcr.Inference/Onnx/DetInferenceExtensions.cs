@@ -90,7 +90,51 @@ public static class DetInferenceExtensions
             ? found
             : new DbLikePostprocessor();
         var boxes = strategy.Decode(options, outputs, imageWidth, imageHeight);
-        return NormalizeBoxes(boxes, imageWidth, imageHeight, options.BoxType);
+        var normalized = NormalizeBoxes(boxes, imageWidth, imageHeight, options.BoxType);
+        return FilterTagDetRes(normalized, imageWidth, imageHeight, options.BoxType);
+    }
+
+    public static List<OcrBox> FilterTagDetRes(
+        IReadOnlyList<OcrBox> boxes,
+        int imageWidth,
+        int imageHeight,
+        string boxType)
+    {
+        var filtered = new List<OcrBox>(boxes.Count);
+        var isPoly = boxType.Equals("poly", StringComparison.OrdinalIgnoreCase);
+        foreach (var box in boxes)
+        {
+            if (box.Points.Length < 4)
+            {
+                continue;
+            }
+
+            var clipped = box.Points
+                .Select(p => new[]
+                {
+                    Math.Clamp(p[0], 0, Math.Max(0, imageWidth - 1)),
+                    Math.Clamp(p[1], 0, Math.Max(0, imageHeight - 1))
+                })
+                .ToArray();
+
+            if (isPoly)
+            {
+                filtered.Add(new OcrBox(clipped));
+                continue;
+            }
+
+            var ordered = EnsureQuadOrder(clipped);
+            var rectWidth = EstimatePointDistance(ordered[0], ordered[1]);
+            var rectHeight = EstimatePointDistance(ordered[0], ordered[3]);
+            if (rectWidth <= 3f || rectHeight <= 3f)
+            {
+                continue;
+            }
+
+            filtered.Add(new OcrBox(ordered));
+        }
+
+        return filtered;
     }
 
     public static void WriteDetMetrics(
@@ -142,6 +186,10 @@ public static class DetInferenceExtensions
                 det_db_thresh = options.DetThresh,
                 det_db_box_thresh = options.DetBoxThresh,
                 det_db_unclip_ratio = options.DetUnclipRatio,
+                det_db_score_mode = options.DetDbScoreMode,
+                det_max_candidates = options.DetMaxCandidates,
+                use_slice = options.UseSlice,
+                det_slice_merge_iou = options.SliceMergeIou,
                 det_eval_iou_thresh = options.DetEvalIouThresh
             },
             quality = qualityPayload,
@@ -493,7 +541,7 @@ public static class DetInferenceExtensions
             var ys = points.Select(x => x[1]).ToArray();
             var w = Math.Max(1, xs.Max() - xs.Min() + 1);
             var h = Math.Max(1, ys.Max() - ys.Min() + 1);
-            if (w < 2 || h < 2)
+            if (w < 1 || h < 1)
             {
                 continue;
             }
@@ -563,6 +611,18 @@ public static class DetInferenceExtensions
 
         var rounded = (int)Math.Round(value / stride, MidpointRounding.AwayFromZero) * stride;
         return Math.Max(stride, rounded);
+    }
+
+    private static float EstimatePointDistance(IReadOnlyList<int> a, IReadOnlyList<int> b)
+    {
+        if (a.Count < 2 || b.Count < 2)
+        {
+            return 0f;
+        }
+
+        var dx = a[0] - b[0];
+        var dy = a[1] - b[1];
+        return MathF.Sqrt(dx * dx + dy * dy);
     }
 
     private static float EstimateBoxShortSide(OcrBox box)
@@ -649,7 +709,9 @@ public static class DetInferenceExtensions
                 options.DetBoxThresh,
                 options.DetUnclipRatio,
                 options.UseDilation,
-                options.BoxType);
+                options.BoxType,
+                options.DetMaxCandidates,
+                options.DetDbScoreMode);
             return NonMaxSuppression(boxes, 0.6f);
         }
     }

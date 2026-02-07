@@ -69,6 +69,53 @@ public sealed class DetInferenceExtensionsTests
     }
 
     [Fact]
+    public void FilterTagDetRes_Should_Remove_Thin_Quad_Boxes()
+    {
+        var boxes = new List<OcrBox>
+        {
+            new(
+            [
+                [10, 10],
+                [12, 10],
+                [12, 40],
+                [10, 40]
+            ]),
+            new(
+            [
+                [20, 20],
+                [60, 20],
+                [60, 60],
+                [20, 60]
+            ])
+        };
+
+        var filtered = DetInferenceExtensions.FilterTagDetRes(boxes, 100, 100, "quad");
+        filtered.Should().HaveCount(1);
+        ToRect(filtered[0]).Should().Be((20, 20, 60, 60));
+    }
+
+    [Fact]
+    public void FilterTagDetRes_Should_Only_Clip_For_Poly()
+    {
+        var boxes = new List<OcrBox>
+        {
+            new(
+            [
+                [-10, 0],
+                [1, 0],
+                [1, 2],
+                [-10, 2]
+            ])
+        };
+
+        var filtered = DetInferenceExtensions.FilterTagDetRes(boxes, 100, 100, "poly");
+        filtered.Should().HaveCount(1);
+        var rect = ToRect(filtered[0]);
+        rect.X1.Should().Be(0);
+        rect.Y1.Should().Be(0);
+    }
+
+    [Fact]
     public void WriteDetMetrics_Should_Include_Quality_When_Gt_Provided()
     {
         var dir = Path.Combine(Path.GetTempPath(), "pocr_det_metrics_" + Guid.NewGuid().ToString("N"));
@@ -124,6 +171,8 @@ public sealed class DetInferenceExtensionsTests
         runtimePerImage.GetArrayLength().Should().Be(1);
         runtimePerImage[0].GetProperty("image").GetString().Should().Be("img0.png");
         runtimePerImage[0].GetProperty("total_ms").GetDouble().Should().BeApproximately(6.9d, 0.0001d);
+        doc.RootElement.GetProperty("thresholds").GetProperty("det_db_score_mode").GetString().Should().Be("fast");
+        doc.RootElement.GetProperty("thresholds").GetProperty("det_max_candidates").GetInt32().Should().Be(1000);
     }
 
     private static (int X1, int Y1, int X2, int Y2) ToRect(OcrBox box)

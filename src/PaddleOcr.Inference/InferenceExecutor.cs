@@ -173,12 +173,21 @@ public sealed class InferenceExecutor : ICommandExecutor
         {
             return CommandResult.Fail($"infer det --det_limit_type must be max|min, got={detLimitType}");
         }
+        var detDbScoreMode = (ResolveString(context, "--det_db_score_mode", "Global.det_db_score_mode") ?? "fast").Trim().ToLowerInvariant();
+        if (detDbScoreMode is not ("fast" or "slow"))
+        {
+            return CommandResult.Fail($"infer det --det_db_score_mode must be fast|slow, got={detDbScoreMode}");
+        }
 
         var detThresh = ParseFloat(ResolveString(context, "--det_db_thresh", "Global.det_db_thresh") ?? "0.3", 0.3f);
         var detBoxThresh = ParseFloat(ResolveString(context, "--det_db_box_thresh", "Global.det_db_box_thresh") ?? "0.6", 0.6f);
         var detUnclipRatio = ParseFloat(ResolveString(context, "--det_db_unclip_ratio", "Global.det_db_unclip_ratio") ?? "1.5", 1.5f);
+        var detMaxCandidates = ParseInt(ResolveString(context, "--det_max_candidates", "Global.det_max_candidates") ?? "1000", 1000, 1);
         var detLimitSideLen = ParseInt(ResolveString(context, "--det_limit_side_len", "Global.det_limit_side_len") ?? "640", 640, 32);
         var useDilation = ParseBool(ResolveString(context, "--use_dilation", "Global.use_dilation") ?? "false");
+        var useSlice = ParseBool(ResolveString(context, "--use_slice", "Global.use_slice") ?? "false");
+        var detSliceMergeIou = ParseFloat(ResolveString(context, "--det_slice_merge_iou", "Global.det_slice_merge_iou") ?? "0.3", 0.3f);
+        var detSliceMinBoundDistance = ParseInt(ResolveString(context, "--det_slice_min_bound_distance", "Global.det_slice_min_bound_distance") ?? "50", 50, 1);
         var saveResPath = ResolveString(context, "--save_res_path", "Global.save_res_path");
         var detEastScoreThresh = ParseFloat(ResolveString(context, "--det_east_score_thresh", "Global.det_east_score_thresh") ?? "0.8", 0.8f);
         var detEastCoverThresh = ParseFloat(ResolveString(context, "--det_east_cover_thresh", "Global.det_east_cover_thresh") ?? "0.1", 0.1f);
@@ -242,6 +251,11 @@ public sealed class InferenceExecutor : ICommandExecutor
             return CommandResult.Fail($"infer det --det_eval_iou_thresh must be in [0,1], got={detEvalIouThresh}");
         }
 
+        if (!IsUnitRange(detSliceMergeIou))
+        {
+            return CommandResult.Fail($"infer det --det_slice_merge_iou must be in [0,1], got={detSliceMergeIou}");
+        }
+
         if (!string.IsNullOrWhiteSpace(detGtLabelPath) && !File.Exists(detGtLabelPath))
         {
             return CommandResult.Fail($"infer det --det_gt_label not found: {detGtLabelPath}");
@@ -286,7 +300,12 @@ public sealed class InferenceExecutor : ICommandExecutor
             fceFourierDegree,
             detGtLabelPath,
             detEvalIouThresh,
-            detMetricsPath);
+            detMetricsPath,
+            detDbScoreMode,
+            detMaxCandidates,
+            useSlice,
+            detSliceMergeIou,
+            detSliceMinBoundDistance);
         new DetOnnxRunner().Run(options);
         var resultFile = string.IsNullOrWhiteSpace(saveResPath) ? Path.Combine(output, "det_results.txt") : saveResPath;
         var metricsFile = string.IsNullOrWhiteSpace(detMetricsPath) ? Path.Combine(output, "det_metrics.json") : detMetricsPath;

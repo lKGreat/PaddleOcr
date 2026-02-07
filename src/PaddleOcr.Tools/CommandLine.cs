@@ -98,7 +98,7 @@ public static class CommandLine
                  export-onnx -c <config> [-o K=V ...]
                  export-center -c <config> [-o K=V ...]
                  infer <det|rec|cls|e2e|kie|kie-ser|kie-re|table|sr|system> [-c <config>] [options]
-                   det options: [--det_algorithm DB|DB++|EAST|SAST|PSE|FCE|CT] [--det_db_thresh F] [--det_db_box_thresh F] [--det_db_unclip_ratio F] [--det_box_type quad|poly] [--det_limit_side_len N] [--det_limit_type max|min] [--use_dilation true|false] [--save_res_path <file>] [--det_gt_label <file>] [--det_eval_iou_thresh F] [--det_metrics_path <file>]
+                   det options: [--det_algorithm DB|DB++|EAST|SAST|PSE|FCE|CT] [--det_db_thresh F] [--det_db_box_thresh F] [--det_db_unclip_ratio F] [--det_db_score_mode fast|slow] [--det_max_candidates N] [--det_box_type quad|poly] [--det_limit_side_len N] [--det_limit_type max|min] [--use_dilation true|false] [--use_slice true|false] [--det_slice_merge_iou F] [--det_slice_min_bound_distance N] [--save_res_path <file>] [--det_gt_label <file>] [--det_eval_iou_thresh F] [--det_metrics_path <file>]
                  convert json2pdmodel --json_model_dir <dir> --output_dir <dir> --config <yml>
                  convert check-json-model --json_model_dir <dir>
                  config check -c <config>

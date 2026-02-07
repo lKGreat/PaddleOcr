@@ -125,6 +125,42 @@ public sealed class InferenceExecutorTests
         result.Message.Should().Contain("quad|poly");
     }
 
+    [Fact]
+    public async Task InferDet_Should_Reject_Invalid_DbScoreMode()
+    {
+        var executor = new InferenceExecutor();
+        var context = NewContext(new Dictionary<string, string>
+        {
+            ["--image_dir"] = "./imgs",
+            ["--det_model_dir"] = "./det.onnx",
+            ["--use_onnx"] = "true",
+            ["--det_db_score_mode"] = "invalid"
+        });
+
+        var result = await executor.ExecuteAsync("det", context);
+
+        result.Success.Should().BeFalse();
+        result.Message.Should().Contain("--det_db_score_mode must be fast|slow");
+    }
+
+    [Fact]
+    public async Task InferDet_Should_Reject_Invalid_SliceMergeIou()
+    {
+        var executor = new InferenceExecutor();
+        var context = NewContext(new Dictionary<string, string>
+        {
+            ["--image_dir"] = "./imgs",
+            ["--det_model_dir"] = "./det.onnx",
+            ["--use_onnx"] = "true",
+            ["--det_slice_merge_iou"] = "2"
+        });
+
+        var result = await executor.ExecuteAsync("det", context);
+
+        result.Success.Should().BeFalse();
+        result.Message.Should().Contain("--det_slice_merge_iou must be in [0,1]");
+    }
+
     private static PaddleOcr.Core.Cli.ExecutionContext NewContext(IReadOnlyDictionary<string, string> options)
     {
         return new PaddleOcr.Core.Cli.ExecutionContext(

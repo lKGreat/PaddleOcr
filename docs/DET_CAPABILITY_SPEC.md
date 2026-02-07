@@ -25,10 +25,15 @@ Reference behavior is mapped from `E:\codeding\AI\PaddleOCR-3.3.2\tools` DET too
 - `--det_db_thresh` default `0.3`
 - `--det_db_box_thresh` default `0.6`
 - `--det_db_unclip_ratio` default `1.5`
+- `--det_db_score_mode` default `fast` (`fast|slow`)
+- `--det_max_candidates` default `1000`
 - `--det_box_type` default `quad` (`quad|poly`)
 - `--det_limit_side_len` default `640`
 - `--det_limit_type` default `max` (`max|min`)
 - `--use_dilation` default `false`
+- `--use_slice` default `false`
+- `--det_slice_merge_iou` default `0.3`
+- `--det_slice_min_bound_distance` default `50`
 - `--save_res_path` optional
 - `--det_gt_label` optional (label file in PaddleOCR format)
 - `--det_eval_iou_thresh` default `0.5`
@@ -59,3 +64,5 @@ Reference behavior is mapped from `E:\codeding\AI\PaddleOCR-3.3.2\tools` DET too
 4. Added dynamic DET resize resolution (`det_limit_type=max|min` + stride alignment) for dynamic ONNX inputs.
 5. Added deterministic golden regression unit tests for each DET algorithm decode path.
 6. Added per-image runtime export (`runtime_per_image`) and runtime fields in `per_image`.
+7. Added DB score mode and max-candidate controls (`det_db_score_mode`, `det_max_candidates`).
+8. Added slice inference mode (`use_slice`) with overlap merge and runtime tracking.
