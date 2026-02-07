@@ -277,4 +277,34 @@ internal sealed class TrainingConfigView
     {
         return GetBool(path, fallback);
     }
+
+    /// <summary>
+    /// 是否使用 MultiScaleDataSet。
+    /// </summary>
+    public bool UseMultiScale => GetString("Train.dataset.name", "").Equals("MultiScaleDataSet", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// MultiScale 候选宽度列表。
+    /// 从配置 Train.dataset.ds_width 读取，默认 [320, 256, 192, 128, 96, 64]。
+    /// </summary>
+    public int[] MultiScaleWidths
+    {
+        get
+        {
+            var raw = GetByPath("Train.dataset.ds_width");
+            if (raw is IList<object?> list)
+            {
+                return list
+                    .Select(x => int.TryParse(x?.ToString(), out var v) ? v : 0)
+                    .Where(v => v > 0)
+                    .ToArray();
+            }
+            return [320, 256, 192, 128, 96, 64];
+        }
+    }
+
+    public string GetConfigString(string path, string fallback)
+    {
+        return GetString(path, fallback);
+    }
 }

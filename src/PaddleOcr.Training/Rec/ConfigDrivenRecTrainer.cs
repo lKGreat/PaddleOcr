@@ -27,12 +27,24 @@ internal sealed class ConfigDrivenRecTrainer
         var (charToId, vocab) = SimpleRecDataset.LoadDictionary(cfg.RecCharDictPath, cfg.UseSpaceChar);
         EnsureCharsetCoverage(cfg.TrainLabelFile, cfg.EvalLabelFile, charToId, _logger);
 
-        var trainSet = new SimpleRecDataset(cfg.TrainLabelFile, cfg.DataDir, shape.H, shape.W, cfg.MaxTextLength, charToId);
+        var useMultiScale = cfg.UseMultiScale;
+        SimpleRecDataset? trainSet = null;
+        MultiScaleRecDataset? trainSetMs = null;
+        if (useMultiScale)
+        {
+            trainSetMs = new MultiScaleRecDataset(cfg.TrainLabelFile, cfg.DataDir, shape.H, cfg.MultiScaleWidths, cfg.MaxTextLength, charToId, enableAugmentation: true);
+            _logger.LogInformation("Using MultiScaleDataSet with widths: [{Widths}]", string.Join(", ", cfg.MultiScaleWidths));
+        }
+        else
+        {
+            trainSet = new SimpleRecDataset(cfg.TrainLabelFile, cfg.DataDir, shape.H, shape.W, cfg.MaxTextLength, charToId, enableAugmentation: true);
+        }
+        var trainCount = useMultiScale ? trainSetMs!.Count : trainSet!.Count;
         var evalSet = new SimpleRecDataset(cfg.EvalLabelFile, cfg.EvalDataDir, shape.H, shape.W, cfg.MaxTextLength, charToId);
 
         var dev = ResolveDevice(cfg);
         _logger.LogInformation("Training(rec) device: {Device}", dev.type);
-        _logger.LogInformation("Train samples: {TrainCount}, Eval samples: {EvalCount}, Vocab: {Vocab}", trainSet.Count, evalSet.Count, vocab.Count);
+        _logger.LogInformation("Train samples: {TrainCount}, Eval samples: {EvalCount}, Vocab: {Vocab}", trainCount, evalSet.Count, vocab.Count);
 
         // 从配置构建模型
         var model = BuildModel(cfg, vocab.Count + 1);
@@ -47,14 +59,8 @@ internal sealed class ConfigDrivenRecTrainer
         // 从配置构建损失函数
         var lossFn = BuildLoss(cfg);
 
-        // 加载 checkpoint
-        var resumeCkpt = cfg.ResumeTraining ? ResolveEvalCheckpoint(cfg) : null;
-        if (!string.IsNullOrWhiteSpace(resumeCkpt))
-        {
-            TryLoadCheckpoint(model, resumeCkpt);
-        }
-
         // 训练辅助工具
+        var ckptManager = new CheckpointManager(_logger);
         var ampHelper = cfg.Device.Contains("cuda", StringComparison.OrdinalIgnoreCase) ? new AmpTrainingHelper(dev) : null;
         var modelAverager = new ModelAverager();
         var gradAccumulator = new GradientUtils.GradientAccumulator(GetGradAccumulationSteps(cfg));
@@ -65,47 +71,102 @@ internal sealed class ConfigDrivenRecTrainer
         var staleEpochs = 0;
         var earlyStopped = false;
         var globalStep = 0;
+        var startEpoch = 1;
+
+        // 加载 checkpoint（完整恢复：模型 + 优化器 + 调度器 + 元信息）
+        if (cfg.ResumeTraining)
+        {
+            var meta = ckptManager.LoadFull(cfg.SaveModelDir, "latest", model, optimizer, lrScheduler);
+            if (meta is not null)
+            {
+                startEpoch = meta.Epoch + 1;
+                globalStep = meta.GlobalStep;
+                bestAcc = meta.BestAcc;
+                _logger.LogInformation("Resumed training from epoch {Epoch}, step {Step}, best_acc {Acc:F4}",
+                    startEpoch, globalStep, bestAcc);
+            }
+            else
+            {
+                // 兼容旧 checkpoint 格式（仅模型）
+                var resumeCkpt = ResolveEvalCheckpoint(cfg);
+                if (!string.IsNullOrWhiteSpace(resumeCkpt))
+                {
+                    TryLoadCheckpoint(model, resumeCkpt);
+                }
+            }
+        }
 
         Directory.CreateDirectory(cfg.SaveModelDir);
 
-        for (var epoch = 1; epoch <= cfg.EpochNum; epoch++)
+        for (var epoch = startEpoch; epoch <= cfg.EpochNum; epoch++)
         {
             model.train();
             var lossSum = 0f;
             var sampleCount = 0;
 
-            foreach (var (images, labels, batch) in trainSet.GetBatches(cfg.BatchSize, shuffle: true, rng))
+            // 统一的 batch 迭代：支持 SimpleRecDataset 和 MultiScaleRecDataset
+            IEnumerable<(float[] Images, long[] Labels, int Batch, int Width)> batchIter;
+            if (useMultiScale)
             {
-                using var x = torch.tensor(images, dtype: ScalarType.Float32).reshape(batch, 3, shape.H, shape.W).to(dev);
+                batchIter = trainSetMs!.GetBatches(cfg.BatchSize, shuffle: true, rng)
+                    .Select(b => (b.Images, b.Labels, b.Batch, b.Width));
+            }
+            else
+            {
+                batchIter = trainSet!.GetBatches(cfg.BatchSize, shuffle: true, rng)
+                    .Select(b => (b.Images, b.Labels, b.Batch, shape.W));
+            }
+
+            foreach (var (images, labels, batch, batchW) in batchIter)
+            {
+                using var x = torch.tensor(images, dtype: ScalarType.Float32).reshape(batch, 3, shape.H, batchW).to(dev);
                 using var y = torch.tensor(labels, dtype: ScalarType.Int64).reshape(batch, cfg.MaxTextLength).to(dev);
 
-                // 混合精度训练
-                using var autocast = ampHelper?.Autocast();
                 optimizer.zero_grad();
 
-                // 前向传播
+                // 混合精度前向传播
+                using var autocast = ampHelper?.Autocast();
                 var predictions = model.ForwardDict(x, new Dictionary<string, Tensor> { ["label"] = y });
                 var batchDict = new Dictionary<string, Tensor> { ["label"] = y };
                 var lossDict = lossFn.Forward(predictions, batchDict);
                 var loss = lossDict["loss"];
 
-                // 反向传播
-                loss.backward();
+                // NaN/Inf 守卫：检查 loss 是否有效
+                var lossVal = loss.ToSingle();
+                if (float.IsNaN(lossVal) || float.IsInfinity(lossVal))
+                {
+                    _logger.LogWarning("NaN/Inf loss detected at step {Step}, skipping this batch", globalStep);
+                    globalStep++;
+                    foreach (var t in predictions.Values) t.Dispose();
+                    foreach (var t in lossDict.Values) t.Dispose();
+                    continue;
+                }
+
+                // AMP: 缩放 loss 防止 float16 梯度下溢
+                var scaledLoss = ampHelper is not null ? ampHelper.ScaleLoss(loss) : loss;
+                scaledLoss.backward();
+                if (!ReferenceEquals(scaledLoss, loss)) scaledLoss.Dispose();
+
+                // AMP: 反缩放梯度并检查 inf/nan
+                var gradsOk = ampHelper?.UnscaleAndCheck(model) ?? true;
 
                 // 梯度裁剪
-                if (cfg.GradClipNorm > 0f)
+                if (gradsOk && cfg.GradClipNorm > 0f)
                 {
                     GradientUtils.ClipGradNorm(model, cfg.GradClipNorm);
                 }
 
-                // 梯度累积
-                if (gradAccumulator.ShouldUpdate())
+                // 梯度累积 + 优化器更新
+                if (gradsOk && gradAccumulator.ShouldUpdate())
                 {
                     optimizer.step();
                     optimizer.zero_grad();
                 }
 
-                lossSum += loss.ToSingle() * batch;
+                // AMP: 更新 scaler 状态
+                ampHelper?.Update();
+
+                lossSum += lossVal * batch;
                 sampleCount += batch;
                 globalStep++;
 
@@ -131,14 +192,14 @@ internal sealed class ConfigDrivenRecTrainer
             {
                 bestAcc = evalMetrics.Accuracy;
                 staleEpochs = 0;
-                SaveCheckpoint(cfg.SaveModelDir, model, "best.pt");
+                ckptManager.SaveFull(cfg.SaveModelDir, "best", model, optimizer, lrScheduler, epoch, globalStep, bestAcc);
             }
             else
             {
                 staleEpochs++;
             }
 
-            SaveCheckpoint(cfg.SaveModelDir, model, "latest.pt");
+            ckptManager.SaveFull(cfg.SaveModelDir, "latest", model, optimizer, lrScheduler, epoch, globalStep, bestAcc);
             _logger.LogInformation(
                 "epoch={Epoch}/{Total} train_loss={Loss:F4} eval_acc={EvalAcc:F4} eval_char_acc={CharAcc:F4} eval_edit={Edit:F4} lr={Lr:F6}",
                 epoch, cfg.EpochNum, trainLoss, evalMetrics.Accuracy, evalMetrics.CharacterAccuracy, evalMetrics.AvgEditDistance, lrScheduler.CurrentLR);
@@ -157,13 +218,14 @@ internal sealed class ConfigDrivenRecTrainer
         if (ShouldUseModelAveraging(cfg))
         {
             modelAverager.Apply(model);
-            SaveCheckpoint(cfg.SaveModelDir, model, "best_averaged.pt");
+            ckptManager.SaveModel(cfg.SaveModelDir, model, "best_averaged.pt");
         }
 
+        ampHelper?.Dispose();
         optimizer.Dispose();
         model.Dispose();
         var summary = new TrainingSummary(epochsCompleted, bestAcc, cfg.SaveModelDir);
-        SaveSummary(cfg, summary, earlyStopped, resumeCkpt);
+        SaveSummary(cfg, summary, earlyStopped, cfg.ResumeTraining ? cfg.SaveModelDir : null);
         return summary;
     }
 
