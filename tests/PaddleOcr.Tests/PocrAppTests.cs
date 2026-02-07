@@ -236,4 +236,70 @@ public sealed class PocrAppTests
         code.Should().Be(0);
         plugin.Calls.Should().ContainSingle(c => c == "verify-trust");
     }
+
+    [Fact]
+    public async Task RunAsync_DoctorParityTableKie_Should_Fail_Without_Config()
+    {
+        var app = new PocrApp(
+            NullLogger.Instance,
+            new ConfigLoader(),
+            new ProbeExecutor("training"),
+            new ProbeExecutor("inference"),
+            new ProbeExecutor("export"),
+            new ProbeExecutor("service"),
+            new ProbeExecutor("e2e"),
+            new ProbeExecutor("benchmark"),
+            new ProbeExecutor("plugin"));
+
+        var code = await app.RunAsync(["doctor", "parity-table-kie"]);
+
+        code.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task RunAsync_DoctorParityTableKie_Should_Pass_With_Required_Files()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "pocr_parity_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var table = Path.Combine(dir, "table.onnx");
+        var det = Path.Combine(dir, "det.onnx");
+        var rec = Path.Combine(dir, "rec.onnx");
+        var kie = Path.Combine(dir, "kie.onnx");
+        var ser = Path.Combine(dir, "ser.onnx");
+        var re = Path.Combine(dir, "re.onnx");
+        var dict = Path.Combine(dir, "dict.txt");
+        foreach (var f in new[] { table, det, rec, kie, ser, re, dict })
+        {
+            await File.WriteAllTextAsync(f, "x");
+        }
+
+        var cfg = Path.Combine(dir, "cfg.yml");
+        await File.WriteAllTextAsync(cfg,
+            $"""
+             Global:
+               table_model_dir: {table}
+               det_model_dir: {det}
+               rec_model_dir: {rec}
+               rec_char_dict_path: {dict}
+               kie_model_dir: {kie}
+               ser_model_dir: {ser}
+               re_model_dir: {re}
+             Architecture:
+               model_type: kie
+             """);
+
+        var app = new PocrApp(
+            NullLogger.Instance,
+            new ConfigLoader(),
+            new ProbeExecutor("training"),
+            new ProbeExecutor("inference"),
+            new ProbeExecutor("export"),
+            new ProbeExecutor("service"),
+            new ProbeExecutor("e2e"),
+            new ProbeExecutor("benchmark"),
+            new ProbeExecutor("plugin"));
+
+        var code = await app.RunAsync(["doctor", "parity-table-kie", "-c", cfg, "--mode", "all"]);
+        code.Should().Be(0);
+    }
 }

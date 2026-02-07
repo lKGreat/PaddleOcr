@@ -40,6 +40,16 @@ public sealed class CommandLineTests
     }
 
     [Fact]
+    public void Parse_Should_Read_Doctor_Parity_Subcommand()
+    {
+        var cmd = CommandLine.Parse(["doctor", "parity-table-kie", "-c", "cfg.yml", "--mode", "table"]);
+        cmd.Root.Should().Be("doctor");
+        cmd.Sub.Should().Be("parity-table-kie");
+        cmd.ConfigPath.Should().Be("cfg.yml");
+        cmd.Options["--mode"].Should().Be("table");
+    }
+
+    [Fact]
     public void Parse_Should_Read_Benchmark_Subcommand()
     {
         var cmd = CommandLine.Parse(["benchmark", "run", "--scenario", "infer:system", "--iterations", "20"]);

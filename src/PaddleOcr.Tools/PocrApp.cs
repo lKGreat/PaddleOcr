@@ -127,27 +127,69 @@ public sealed class PocrApp
 
     private static Task<CommandResult> RunDoctorAsync(ParsedCommand parsed, PaddleOcr.Core.Cli.ExecutionContext context)
     {
-        if (!string.Equals(parsed.Sub, "check-models", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(parsed.Sub, "check-models", StringComparison.OrdinalIgnoreCase))
         {
-            return Task.FromResult(CommandResult.Fail("doctor supports: check-models"));
+            var missing = new List<string>();
+            ValidateModelPath(context, "--det_model_dir", "Global.det_model_dir", missing);
+            ValidateModelPath(context, "--rec_model_dir", "Global.rec_model_dir", missing);
+            ValidateModelPath(context, "--cls_model_dir", "Global.cls_model_dir", missing);
+            ValidateModelPath(context, "--table_model_dir", "Global.table_model_dir", missing);
+            ValidateModelPath(context, "--sr_model_dir", "Global.sr_model_dir", missing);
+            ValidateModelPath(context, "--kie_model_dir", "Global.kie_model_dir", missing);
+            ValidateModelPath(context, "--ser_model_dir", "Global.ser_model_dir", missing);
+            ValidateModelPath(context, "--re_model_dir", "Global.re_model_dir", missing);
+
+            if (missing.Count > 0)
+            {
+                return Task.FromResult(CommandResult.Fail("doctor check-models failed:\n" + string.Join('\n', missing)));
+            }
+
+            return Task.FromResult(CommandResult.Ok("doctor check-models passed"));
         }
 
-        var missing = new List<string>();
-        ValidateModelPath(context, "--det_model_dir", "Global.det_model_dir", missing);
-        ValidateModelPath(context, "--rec_model_dir", "Global.rec_model_dir", missing);
-        ValidateModelPath(context, "--cls_model_dir", "Global.cls_model_dir", missing);
-        ValidateModelPath(context, "--table_model_dir", "Global.table_model_dir", missing);
-        ValidateModelPath(context, "--sr_model_dir", "Global.sr_model_dir", missing);
-        ValidateModelPath(context, "--kie_model_dir", "Global.kie_model_dir", missing);
-        ValidateModelPath(context, "--ser_model_dir", "Global.ser_model_dir", missing);
-        ValidateModelPath(context, "--re_model_dir", "Global.re_model_dir", missing);
-
-        if (missing.Count > 0)
+        if (string.Equals(parsed.Sub, "parity-table-kie", StringComparison.OrdinalIgnoreCase))
         {
-            return Task.FromResult(CommandResult.Fail("doctor check-models failed:\n" + string.Join('\n', missing)));
+            if (string.IsNullOrWhiteSpace(context.ConfigPath))
+            {
+                return Task.FromResult(CommandResult.Fail("doctor parity-table-kie requires -c/--config"));
+            }
+
+            var mode = context.Options.TryGetValue("--mode", out var modeText) && !string.IsNullOrWhiteSpace(modeText)
+                ? modeText.Trim().ToLowerInvariant()
+                : "all";
+            if (mode is not ("all" or "table" or "kie"))
+            {
+                return Task.FromResult(CommandResult.Fail("doctor parity-table-kie --mode must be one of all|table|kie"));
+            }
+
+            var missing = new List<string>();
+            if (mode is "all" or "table")
+            {
+                ValidateRequiredPath(context, "--table_model_dir", "Global.table_model_dir", missing);
+                ValidateRequiredPath(context, "--det_model_dir", "Global.det_model_dir", missing);
+                ValidateRequiredPath(context, "--rec_model_dir", "Global.rec_model_dir", missing);
+                ValidateRequiredPath(context, "--rec_char_dict_path", "Global.rec_char_dict_path", missing);
+            }
+
+            if (mode is "all" or "kie")
+            {
+                ValidateRequiredPath(context, "--kie_model_dir", "Global.kie_model_dir", missing);
+                ValidateRequiredPath(context, "--ser_model_dir", "Global.ser_model_dir", missing);
+                ValidateRequiredPath(context, "--re_model_dir", "Global.re_model_dir", missing);
+                ValidateRequiredPath(context, "--det_model_dir", "Global.det_model_dir", missing);
+                ValidateRequiredPath(context, "--rec_model_dir", "Global.rec_model_dir", missing);
+                ValidateRequiredPath(context, "--rec_char_dict_path", "Global.rec_char_dict_path", missing);
+            }
+
+            if (missing.Count > 0)
+            {
+                return Task.FromResult(CommandResult.Fail("doctor parity-table-kie failed:\n" + string.Join('\n', missing)));
+            }
+
+            return Task.FromResult(CommandResult.Ok($"doctor parity-table-kie passed (mode={mode})"));
         }
 
-        return Task.FromResult(CommandResult.Ok("doctor check-models passed"));
+        return Task.FromResult(CommandResult.Fail("doctor supports: check-models | parity-table-kie"));
     }
 
     private static void ValidateModelPath(PaddleOcr.Core.Cli.ExecutionContext context, string optionKey, string configPath, ICollection<string> errors)
@@ -164,6 +206,30 @@ public sealed class PocrApp
 
         if (string.IsNullOrWhiteSpace(path))
         {
+            return;
+        }
+
+        if (!File.Exists(path))
+        {
+            errors.Add($"{optionKey}: not found -> {path}");
+        }
+    }
+
+    private static void ValidateRequiredPath(PaddleOcr.Core.Cli.ExecutionContext context, string optionKey, string configPath, ICollection<string> errors)
+    {
+        string? path = null;
+        if (context.Options.TryGetValue(optionKey, out var opt) && !string.IsNullOrWhiteSpace(opt))
+        {
+            path = opt;
+        }
+        else
+        {
+            path = GetConfigValue(context.Config, configPath);
+        }
+
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            errors.Add($"{optionKey}: missing (option or {configPath})");
             return;
         }
 
