@@ -57,6 +57,11 @@ public sealed class InferenceExecutor : ICommandExecutor
             return Task.FromResult(RunE2e(context));
         }
 
+        if (subCommand.Equals("sr", StringComparison.OrdinalIgnoreCase))
+        {
+            return Task.FromResult(RunSr(context));
+        }
+
         context.Logger.LogInformation("Running infer {Mode}", subCommand);
         return Task.FromResult(CommandResult.Ok($"infer {subCommand} scaffold executed."));
     }
@@ -238,6 +243,31 @@ public sealed class InferenceExecutor : ICommandExecutor
             ParseFloat(GetOrDefault(context, "--det_db_thresh", "0.3")));
         new SystemOnnxRunner().Run(options);
         return CommandResult.Ok($"infer e2e completed. output={output}");
+    }
+
+    private static CommandResult RunSr(PaddleOcr.Core.Cli.ExecutionContext context)
+    {
+        var imageDir = GetOrNull(context, "--image_dir");
+        var srModel = GetOrNull(context, "--sr_model_dir");
+        if (string.IsNullOrWhiteSpace(imageDir) || string.IsNullOrWhiteSpace(srModel))
+        {
+            return CommandResult.Fail("infer sr requires --image_dir and --sr_model_dir");
+        }
+
+        if (!ParseBool(GetOrDefault(context, "--use_onnx", "false")))
+        {
+            return CommandResult.Fail("infer sr currently supports --use_onnx=true only.");
+        }
+
+        if (!File.Exists(srModel))
+        {
+            return CommandResult.Fail($"sr model not found: {srModel}");
+        }
+
+        var output = GetOrDefault(context, "--draw_img_save_dir", "./inference_results");
+        var options = new SrOnnxOptions(imageDir, srModel, output);
+        new SrOnnxRunner().Run(options);
+        return CommandResult.Ok($"infer sr completed. output={output}");
     }
 
     private static string? GetOrNull(PaddleOcr.Core.Cli.ExecutionContext context, string key)

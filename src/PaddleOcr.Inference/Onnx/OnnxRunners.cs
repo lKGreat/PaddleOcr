@@ -187,6 +187,76 @@ public sealed class SystemOnnxRunner
     }
 }
 
+public sealed class SrOnnxRunner
+{
+    public void Run(SrOnnxOptions options)
+    {
+        var imageFiles = OnnxRuntimeUtils.EnumerateImages(options.ImageDir).ToList();
+        if (imageFiles.Count == 0)
+        {
+            throw new InvalidOperationException($"No image found in: {options.ImageDir}");
+        }
+
+        Directory.CreateDirectory(options.OutputDir);
+        using var sr = new InferenceSession(options.SrModelPath);
+        var lines = new List<string>(imageFiles.Count);
+        foreach (var file in imageFiles)
+        {
+            using var img = Image.Load<Rgb24>(file);
+            var output = OnnxRuntimeUtils.RunSession(sr, img, img.Height, img.Width).FirstOrDefault();
+            if (output is null || output.Dims.Length < 4)
+            {
+                continue;
+            }
+
+            using var outImg = TensorToImage(output.Data, output.Dims);
+            var saveFile = Path.Combine(options.OutputDir, Path.GetFileName(file));
+            outImg.Save(saveFile);
+            lines.Add($"{Path.GetFileName(file)}\t{saveFile}");
+        }
+
+        File.WriteAllLines(Path.Combine(options.OutputDir, "sr_results.txt"), lines);
+    }
+
+    private static Image<Rgb24> TensorToImage(float[] data, int[] dims)
+    {
+        var c = dims[1];
+        var h = dims[2];
+        var w = dims[3];
+        if (c < 3)
+        {
+            throw new InvalidOperationException("SR output channel count should be >=3.");
+        }
+
+        var img = new Image<Rgb24>(w, h);
+        var hw = h * w;
+        for (var y = 0; y < h; y++)
+        {
+            for (var x = 0; x < w; x++)
+            {
+                var idx = y * w + x;
+                var r = Clamp255(data[idx]);
+                var g = Clamp255(data[hw + idx]);
+                var b = Clamp255(data[2 * hw + idx]);
+                img[x, y] = new Rgb24((byte)r, (byte)g, (byte)b);
+            }
+        }
+
+        return img;
+    }
+
+    private static int Clamp255(float v)
+    {
+        var value = v;
+        if (value <= 1f)
+        {
+            value *= 255f;
+        }
+
+        return Math.Clamp((int)MathF.Round(value), 0, 255);
+    }
+}
+
 public sealed record TensorOutput(float[] Data, int[] Dims);
 
 public sealed record DetOnnxOptions(string ImageDir, string DetModelPath, string OutputDir, float DetThresh);
@@ -218,6 +288,8 @@ public sealed record SystemOnnxOptions(
     float DropScore,
     float ClsThresh,
     float DetThresh);
+
+public sealed record SrOnnxOptions(string ImageDir, string SrModelPath, string OutputDir);
 
 public sealed record OcrItem(string Transcription, int[][] Points, float Score);
 public sealed record OcrBox(int[][] Points);
