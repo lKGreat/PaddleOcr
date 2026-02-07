@@ -47,6 +47,7 @@ public sealed class PocrApp
             "export-center" => await _export.ExecuteAsync("export-center", context, cancellationToken),
             "infer" => await _inference.ExecuteAsync(parsed.Sub ?? string.Empty, context, cancellationToken),
             "convert" => await RunConvertAsync(parsed, context, cancellationToken),
+            "config" => await RunConfigAsync(parsed, context),
             "service" => await _service.ExecuteAsync(parsed.Sub ?? string.Empty, context, cancellationToken),
             "e2e" => await _e2e.ExecuteAsync(parsed.Sub ?? string.Empty, context, cancellationToken),
             _ => CommandResult.Fail($"Unknown command: {parsed.Root}\n{CommandLine.GetHelp()}")
@@ -75,6 +76,44 @@ public sealed class PocrApp
         }
 
         return Task.FromResult(CommandResult.Fail("convert supports: json2pdmodel | check-json-model"));
+    }
+
+    private Task<CommandResult> RunConfigAsync(ParsedCommand parsed, PaddleOcr.Core.Cli.ExecutionContext context)
+    {
+        if (string.Equals(parsed.Sub, "check", StringComparison.OrdinalIgnoreCase))
+        {
+            if (string.IsNullOrWhiteSpace(context.ConfigPath))
+            {
+                return Task.FromResult(CommandResult.Fail("config check requires -c/--config"));
+            }
+
+            var ok = ConfigValidator.ValidateBasic(context.Config, out var message);
+            return Task.FromResult(ok
+                ? CommandResult.Ok($"config check passed: {message}")
+                : CommandResult.Fail($"config check failed: {message}"));
+        }
+
+        if (string.Equals(parsed.Sub, "diff", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!context.Options.TryGetValue("--base", out var basePath) ||
+                !context.Options.TryGetValue("--target", out var targetPath))
+            {
+                return Task.FromResult(CommandResult.Fail("config diff requires --base and --target"));
+            }
+
+            var left = _configLoader.Load(basePath);
+            var right = _configLoader.Load(targetPath);
+            var diffs = ConfigValidator.Diff(left, right);
+            if (diffs.Count == 0)
+            {
+                return Task.FromResult(CommandResult.Ok("config diff: no differences"));
+            }
+
+            var preview = string.Join('\n', diffs.Take(20));
+            return Task.FromResult(CommandResult.Ok($"config diff: {diffs.Count} differences\n{preview}"));
+        }
+
+        return Task.FromResult(CommandResult.Fail("config supports: check | diff"));
     }
 
     private PaddleOcr.Core.Cli.ExecutionContext BuildContext(ParsedCommand parsed)

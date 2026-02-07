@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using TorchSharp;
 using static TorchSharp.torch;
 using static TorchSharp.torch.nn;
@@ -59,6 +59,10 @@ internal sealed class SimpleDetTrainer
                 using var pred = model.call(x);
                 using var loss = functional.binary_cross_entropy_with_logits(pred, y);
                 loss.backward();
+                if (cfg.GradClipNorm > 0f)
+                {
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.GradClipNorm);
+                }
                 optimizer.step();
                 lossSum += loss.ToSingle() * batch;
                 samples += batch;

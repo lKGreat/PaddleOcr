@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using TorchSharp;
 using static TorchSharp.torch;
@@ -63,6 +63,10 @@ internal sealed class SimpleRecTrainer
                 using var logits = model.call(x); // [B,T,V]
                 using var loss = functional.cross_entropy(logits.reshape(batch * cfg.MaxTextLength, vocab.Count + 1), y.reshape(batch * cfg.MaxTextLength));
                 loss.backward();
+                if (cfg.GradClipNorm > 0f)
+                {
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.GradClipNorm);
+                }
                 optimizer.step();
 
                 lossSum += loss.ToSingle() * batch;

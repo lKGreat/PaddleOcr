@@ -25,7 +25,7 @@ Status: `done` / `in_progress` / `pending`
 19. done - Project gitignore guardrails
 20. done - Phase status report
 21. done - Train CLS learning-rate decay schedule (`step_size/gamma`)
-22. pending
+22. done - Train DET gradient clipping support (`Optimizer.grad_clip_norm`)
 23. done - Early stopping support (`Global.early_stop_patience`)
 24. done - Rec charset coverage validation warnings
 25. done - Resume training from checkpoint (`Global.resume_training`)
@@ -39,11 +39,11 @@ Status: `done` / `in_progress` / `pending`
 33. done - Service failure dump
 34. done - Service stress rounds
 35. done - Service report JSON
-36. pending
-37. pending
-38. pending
-39. pending
-40. pending
+36. done - E2E eval multi-threshold support (`--iou_threshes`)
+37. done - E2E eval per-file detail output (`--detail_json`)
+38. done - E2E convert-label tolerant parsing fallback
+39. done - Config schema basic validator (`config check`)
+40. done - Config diff tool (`config diff`)
 41. pending
 42. pending
 43. pending

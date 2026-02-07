@@ -100,7 +100,9 @@ public static class CommandLine
                  infer <det|rec|cls|e2e|kie|kie-ser|kie-re|table|sr|system> [-c <config>] [options]
                  convert json2pdmodel --json_model_dir <dir> --output_dir <dir> --config <yml>
                  convert check-json-model --json_model_dir <dir>
-                 service test --server_url <url> --image_dir <dir>
+                 config check -c <config>
+                 config diff --base <path> --target <path>
+                 service test --server_url <url> --image_dir <dir> [--parallel N --timeout_ms MS --retries N --stress_rounds N --dump_failures true]
                  e2e <convert-label|eval> [args]
                """;
     }
@@ -109,6 +111,7 @@ public static class CommandLine
     {
         return root.Equals("infer", StringComparison.OrdinalIgnoreCase)
             || root.Equals("convert", StringComparison.OrdinalIgnoreCase)
+            || root.Equals("config", StringComparison.OrdinalIgnoreCase)
             || root.Equals("service", StringComparison.OrdinalIgnoreCase)
             || root.Equals("e2e", StringComparison.OrdinalIgnoreCase);
     }

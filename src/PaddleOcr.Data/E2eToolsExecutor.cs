@@ -31,10 +31,25 @@ public sealed class E2eToolsExecutor : ICommandExecutor
                 return Task.FromResult(CommandResult.Fail("e2e eval requires <gt_dir> <pred_dir>"));
             }
 
-            var summary = Evaluate(gtDir, predDir);
+            var thresholds = ParseIouThresholds(context.Options.TryGetValue("--iou_threshes", out var t) ? t : "0.5");
+            var result = Evaluate(gtDir, predDir, thresholds);
+            if (context.Options.TryGetValue("--detail_json", out var detailJson) && !string.IsNullOrWhiteSpace(detailJson))
+            {
+                var dir = Path.GetDirectoryName(detailJson);
+                if (!string.IsNullOrWhiteSpace(dir))
+                {
+                    Directory.CreateDirectory(dir);
+                }
+
+                File.WriteAllText(
+                    detailJson,
+                    JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
+            }
+
+            var summary = result.Summaries.First();
             var message =
                 $"e2e eval completed: p={summary.Precision:F4}, r={summary.Recall:F4}, f={summary.Fmeasure:F4}, " +
-                $"char_acc={summary.CharacterAccuracy:F4}, gt={summary.GtCount}, dt={summary.DtCount}";
+                $"char_acc={summary.CharacterAccuracy:F4}, gt={summary.GtCount}, dt={summary.DtCount}, iou_threshes={string.Join(',', thresholds.Select(x => x.ToString("0.##", CultureInfo.InvariantCulture)))}";
             return Task.FromResult(CommandResult.Ok(message));
         }
 
@@ -81,7 +96,13 @@ public sealed class E2eToolsExecutor : ICommandExecutor
                 split = line.Split("    ", 2, StringSplitOptions.None);
                 if (split.Length != 2)
                 {
-                    continue;
+                    var jsonStart = line.IndexOf('[');
+                    if (jsonStart <= 0)
+                    {
+                        continue;
+                    }
+
+                    split = [line[..jsonStart].Trim(), line[jsonStart..].Trim()];
                 }
             }
 
@@ -158,7 +179,7 @@ public sealed class E2eToolsExecutor : ICommandExecutor
         return values;
     }
 
-    private static E2eSummary Evaluate(string gtDir, string predDir)
+    private static E2eEvalResult Evaluate(string gtDir, string predDir, IReadOnlyList<float> iouThresholds)
     {
         if (!Directory.Exists(gtDir))
         {
@@ -171,92 +192,108 @@ public sealed class E2eToolsExecutor : ICommandExecutor
         }
 
         var gtFiles = Directory.EnumerateFiles(gtDir, "*.txt", SearchOption.TopDirectoryOnly).Select(Path.GetFileName).Where(x => x is not null).Cast<string>().ToList();
-        var numGtChars = 0;
-        var gtCount = 0;
-        var dtCount = 0;
-        var hit = 0;
-        var edSum = 0;
-        const float iouThresh = 0.5f;
         const float eps = 1e-9f;
+        var summaries = new List<E2eSummary>(iouThresholds.Count);
+        var fileDetails = new List<E2eFileDetail>(gtFiles.Count * Math.Max(1, iouThresholds.Count));
 
-        foreach (var name in gtFiles)
+        foreach (var iouThresh in iouThresholds)
         {
-            var gts = LoadGt(Path.Combine(gtDir, name), out var ignoreMasks);
-            var dts = LoadDt(Path.Combine(predDir, name));
-            var dtMatch = new bool[dts.Count];
-            var gtMatch = new bool[gts.Count];
-            var pairIous = new List<(int Gt, int Dt, float Iou)>();
-
-            for (var i = 0; i < gts.Count; i++)
+            var numGtChars = 0;
+            var gtCount = 0;
+            var dtCount = 0;
+            var hit = 0;
+            var edSum = 0;
+            foreach (var name in gtFiles)
             {
-                for (var j = 0; j < dts.Count; j++)
+                var gts = LoadGt(Path.Combine(gtDir, name), out var ignoreMasks);
+                var dts = LoadDt(Path.Combine(predDir, name));
+                var dtMatch = new bool[dts.Count];
+                var gtMatch = new bool[gts.Count];
+                var pairIous = new List<(int Gt, int Dt, float Iou)>();
+
+                for (var i = 0; i < gts.Count; i++)
                 {
-                    var iou = PolygonIou(gts[i].Coords, dts[j].Coords);
-                    if (iou >= iouThresh)
+                    for (var j = 0; j < dts.Count; j++)
                     {
-                        pairIous.Add((i, j, iou));
+                        var iou = PolygonIou(gts[i].Coords, dts[j].Coords);
+                        if (iou >= iouThresh)
+                        {
+                            pairIous.Add((i, j, iou));
+                        }
                     }
                 }
+
+                var fileHit = 0;
+                var fileGtCount = 0;
+                var fileDtCount = 0;
+                foreach (var pair in pairIous.OrderByDescending(x => x.Iou))
+                {
+                    if (gtMatch[pair.Gt] || dtMatch[pair.Dt])
+                    {
+                        continue;
+                    }
+
+                    gtMatch[pair.Gt] = true;
+                    dtMatch[pair.Dt] = true;
+                    if (ignoreMasks[pair.Gt] != "0")
+                    {
+                        continue;
+                    }
+
+                    var gtText = ToHalfWidth(gts[pair.Gt].Text);
+                    var dtText = ToHalfWidth(dts[pair.Dt].Text);
+                    edSum += Levenshtein(gtText, dtText);
+                    numGtChars += gtText.Length;
+                    if (string.Equals(gtText, dtText, StringComparison.Ordinal))
+                    {
+                        hit++;
+                        fileHit++;
+                    }
+
+                    gtCount++;
+                    dtCount++;
+                    fileGtCount++;
+                    fileDtCount++;
+                }
+
+                for (var i = 0; i < dtMatch.Length; i++)
+                {
+                    if (dtMatch[i])
+                    {
+                        continue;
+                    }
+
+                    edSum += Levenshtein(dts[i].Text, string.Empty);
+                    dtCount++;
+                    fileDtCount++;
+                }
+
+                for (var i = 0; i < gtMatch.Length; i++)
+                {
+                    if (gtMatch[i] || ignoreMasks[i] != "0")
+                    {
+                        continue;
+                    }
+
+                    edSum += Levenshtein(gts[i].Text, string.Empty);
+                    numGtChars += gts[i].Text.Length;
+                    gtCount++;
+                    fileGtCount++;
+                }
+
+                fileDetails.Add(new E2eFileDetail(name, iouThresh, fileHit, fileGtCount, fileDtCount));
             }
 
-            foreach (var pair in pairIous.OrderByDescending(x => x.Iou))
-            {
-                if (gtMatch[pair.Gt] || dtMatch[pair.Dt])
-                {
-                    continue;
-                }
-
-                gtMatch[pair.Gt] = true;
-                dtMatch[pair.Dt] = true;
-                if (ignoreMasks[pair.Gt] != "0")
-                {
-                    continue;
-                }
-
-                var gtText = ToHalfWidth(gts[pair.Gt].Text);
-                var dtText = ToHalfWidth(dts[pair.Dt].Text);
-                edSum += Levenshtein(gtText, dtText);
-                numGtChars += gtText.Length;
-                if (string.Equals(gtText, dtText, StringComparison.Ordinal))
-                {
-                    hit++;
-                }
-
-                gtCount++;
-                dtCount++;
-            }
-
-            for (var i = 0; i < dtMatch.Length; i++)
-            {
-                if (dtMatch[i])
-                {
-                    continue;
-                }
-
-                edSum += Levenshtein(dts[i].Text, string.Empty);
-                dtCount++;
-            }
-
-            for (var i = 0; i < gtMatch.Length; i++)
-            {
-                if (gtMatch[i] || ignoreMasks[i] != "0")
-                {
-                    continue;
-                }
-
-                edSum += Levenshtein(gts[i].Text, string.Empty);
-                numGtChars += gts[i].Text.Length;
-                gtCount++;
-            }
+            var precision = hit / (dtCount + eps);
+            var recall = hit / (gtCount + eps);
+            var fmeasure = 2f * precision * recall / (precision + recall + eps);
+            var avgEditDistImg = gtFiles.Count == 0 ? 0 : (float)edSum / gtFiles.Count;
+            var avgEditDistField = edSum / (gtCount + eps);
+            var characterAcc = 1f - edSum / (numGtChars + eps);
+            summaries.Add(new E2eSummary(iouThresh, precision, recall, fmeasure, characterAcc, avgEditDistField, avgEditDistImg, gtCount, dtCount));
         }
 
-        var precision = hit / (dtCount + eps);
-        var recall = hit / (gtCount + eps);
-        var fmeasure = 2f * precision * recall / (precision + recall + eps);
-        var avgEditDistImg = gtFiles.Count == 0 ? 0 : (float)edSum / gtFiles.Count;
-        var avgEditDistField = edSum / (gtCount + eps);
-        var characterAcc = 1f - edSum / (numGtChars + eps);
-        return new E2eSummary(precision, recall, fmeasure, characterAcc, avgEditDistField, avgEditDistImg, gtCount, dtCount);
+        return new E2eEvalResult(summaries, fileDetails);
     }
 
     private static List<E2eLine> LoadGt(string path, out List<string> ignoreMasks)
@@ -488,6 +525,25 @@ public sealed class E2eToolsExecutor : ICommandExecutor
         return Math.Abs(sum) * 0.5f;
     }
 
+    private static List<float> ParseIouThresholds(string text)
+    {
+        var values = text.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .Select(x => float.TryParse(x, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : float.NaN)
+            .Where(x => !float.IsNaN(x))
+            .Select(x => Math.Clamp(x, 0.01f, 0.99f))
+            .Distinct()
+            .OrderBy(x => x)
+            .ToList();
+        if (values.Count == 0)
+        {
+            values.Add(0.5f);
+        }
+
+        return values;
+    }
+
     private sealed record E2eLine(float[] Coords, string Text);
-    private sealed record E2eSummary(float Precision, float Recall, float Fmeasure, float CharacterAccuracy, float AvgEditDistField, float AvgEditDistImg, int GtCount, int DtCount);
+    private sealed record E2eSummary(float IouThreshold, float Precision, float Recall, float Fmeasure, float CharacterAccuracy, float AvgEditDistField, float AvgEditDistImg, int GtCount, int DtCount);
+    private sealed record E2eFileDetail(string FileName, float IouThreshold, int Hit, int GtCount, int DtCount);
+    private sealed record E2eEvalResult(IReadOnlyList<E2eSummary> Summaries, IReadOnlyList<E2eFileDetail> Files);
 }

@@ -18,6 +18,7 @@ internal sealed class TrainingConfigView
     public float LearningRate => GetFloat("Optimizer.lr.learning_rate", 1e-3f);
     public int LrDecayStep => GetInt("Optimizer.lr.step_size", 0);
     public float LrDecayGamma => GetFloat("Optimizer.lr.gamma", 0.1f);
+    public float GradClipNorm => GetFloat("Optimizer.grad_clip_norm", 0f);
     public int EarlyStopPatience => GetInt("Global.early_stop_patience", 0);
     public bool ResumeTraining => GetBool("Global.resume_training", true);
     public string SaveModelDir => ResolvePath(GetString("Global.save_model_dir", "./output/cls"));
