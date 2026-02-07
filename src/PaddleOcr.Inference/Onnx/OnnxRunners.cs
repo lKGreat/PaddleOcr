@@ -21,23 +21,36 @@ public sealed class DetOnnxRunner
 
         Directory.CreateDirectory(options.OutputDir);
         using var det = new InferenceSession(options.DetModelPath);
-        var detPost = InferenceComponentRegistry.GetDetPostprocessor();
+        var inputBuilderName = DetInferenceExtensions.ResolveInputBuilder(options.DetAlgorithm);
+        var defaultSize = Math.Max(32, options.DetLimitSideLen);
 
         var lines = new List<string>(imageFiles.Count);
+        var predictionByImage = new Dictionary<string, List<OcrBox>>(StringComparer.OrdinalIgnoreCase);
         foreach (var file in imageFiles)
         {
             using var img = Image.Load<Rgb24>(file);
-            var output = OnnxRuntimeUtils.RunSession(det, img, 640, 640).FirstOrDefault();
-            var boxes = output is null
+            var outputs = OnnxRuntimeUtils.RunSession(det, img, defaultSize, defaultSize, inputBuilderName);
+            var boxes = outputs.Count == 0
                 ? [PostprocessUtils.FullImageBox(img.Width, img.Height)]
-                : detPost(output.Data, output.Dims, img.Width, img.Height, options.DetThresh);
-            var sorted = PostprocessUtils.SortBoxes(boxes);
+                : DetInferenceExtensions.DecodeBoxes(options, outputs, img.Width, img.Height);
+            var sorted = PostprocessUtils.SortBoxes(boxes.Count == 0 ? [PostprocessUtils.FullImageBox(img.Width, img.Height)] : boxes);
             var payload = sorted.Select(b => new { transcription = "", points = b.Points }).ToList();
             lines.Add($"{Path.GetFileName(file)}\t{JsonSerializer.Serialize(payload)}");
+            predictionByImage[Path.GetFileName(file)] = sorted;
             OnnxRuntimeUtils.SaveVisualization(file, sorted, options.OutputDir);
         }
 
-        File.WriteAllLines(Path.Combine(options.OutputDir, "det_results.txt"), lines);
+        var resultPath = string.IsNullOrWhiteSpace(options.SaveResPath)
+            ? Path.Combine(options.OutputDir, "det_results.txt")
+            : options.SaveResPath;
+        var resultDir = Path.GetDirectoryName(Path.GetFullPath(resultPath));
+        if (!string.IsNullOrWhiteSpace(resultDir))
+        {
+            Directory.CreateDirectory(resultDir);
+        }
+
+        File.WriteAllLines(resultPath, lines);
+        DetInferenceExtensions.WriteDetMetrics(options, options.OutputDir, predictionByImage);
     }
 }
 
@@ -407,7 +420,35 @@ public static class TableResultSerializer
 
 public sealed record TensorOutput(float[] Data, int[] Dims);
 
-public sealed record DetOnnxOptions(string ImageDir, string DetModelPath, string OutputDir, float DetThresh);
+public sealed record DetOnnxOptions(
+    string ImageDir,
+    string DetModelPath,
+    string OutputDir,
+    string DetAlgorithm,
+    float DetThresh,
+    float DetBoxThresh,
+    float DetUnclipRatio,
+    bool UseDilation,
+    string BoxType,
+    int DetLimitSideLen,
+    string DetLimitType,
+    string? SaveResPath,
+    float DetEastScoreThresh,
+    float DetEastCoverThresh,
+    float DetEastNmsThresh,
+    float DetSastScoreThresh,
+    float DetSastNmsThresh,
+    float DetPseThresh,
+    float DetPseBoxThresh,
+    float DetPseMinArea,
+    float DetPseScale,
+    IReadOnlyList<int> FceScales,
+    float FceAlpha,
+    float FceBeta,
+    int FceFourierDegree,
+    string? DetGtLabelPath,
+    float DetEvalIouThresh,
+    string? DetMetricsPath);
 
 public sealed record RecOnnxOptions(
     string ImageDir,
@@ -490,16 +531,28 @@ public static class CharsetLoader
 
 public static class OnnxRuntimeUtils
 {
-    public static List<TensorOutput> RunSession(InferenceSession session, string imageFile, int defaultH, int defaultW)
+    public static List<TensorOutput> RunSession(
+        InferenceSession session,
+        string imageFile,
+        int defaultH,
+        int defaultW,
+        string? inputBuilderName = null)
     {
         using var img = Image.Load<Rgb24>(imageFile);
-        return RunSession(session, img, defaultH, defaultW);
+        return RunSession(session, img, defaultH, defaultW, inputBuilderName);
     }
 
-    public static List<TensorOutput> RunSession(InferenceSession session, Image<Rgb24> image, int defaultH, int defaultW)
+    public static List<TensorOutput> RunSession(
+        InferenceSession session,
+        Image<Rgb24> image,
+        int defaultH,
+        int defaultW,
+        string? inputBuilderName = null)
     {
         var input = session.InputMetadata.First();
-        var builder = InferencePreprocessRegistry.GetInputBuilder();
+        var builder = string.IsNullOrWhiteSpace(inputBuilderName)
+            ? InferencePreprocessRegistry.GetInputBuilder()
+            : InferencePreprocessRegistry.GetInputBuilder(inputBuilderName);
         var tensor = builder(image, input.Value.Dimensions, defaultH, defaultW);
         var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(input.Key, tensor) };
         using var outputs = session.Run(inputs);
@@ -644,9 +697,19 @@ public static class PostprocessUtils
             ]);
     }
 
-    public static List<OcrBox> DetectBoxes(float[] data, int[] dims, int imgW, int imgH, float thresh)
+    public static List<OcrBox> DetectBoxes(
+        float[] data,
+        int[] dims,
+        int imgW,
+        int imgH,
+        float thresh,
+        float boxThresh = 0.6f,
+        float unclipRatio = 1.5f,
+        bool useDilation = false,
+        string boxType = "quad")
     {
-        var (map, h, w) = ExtractMap(data, dims);
+        var (rawMap, h, w) = ExtractMap(data, dims);
+        var map = useDilation ? DilateMap(rawMap, h, w, thresh) : rawMap;
         if (map.Length == 0 || h <= 0 || w <= 0)
         {
             return [];
@@ -675,11 +738,13 @@ public static class PostprocessUtils
                 var maxX = x;
                 var maxY = y;
                 var count = 0;
+                var scoreSum = 0f;
 
                 while (queue.Count > 0)
                 {
                     var (cx, cy) = queue.Dequeue();
                     count++;
+                    scoreSum += map[cy * w + cx];
                     minX = Math.Min(minX, cx);
                     minY = Math.Min(minY, cy);
                     maxX = Math.Max(maxX, cx);
@@ -703,17 +768,24 @@ public static class PostprocessUtils
                     continue;
                 }
 
-                var x1 = minX * imgW / w;
-                var y1 = minY * imgH / h;
-                var x2 = Math.Max(x1 + 1, maxX * imgW / w);
-                var y2 = Math.Max(y1 + 1, maxY * imgH / h);
-                boxes.Add(new OcrBox(
-                    [
-                        [x1, y1],
-                        [x2, y1],
-                        [x2, y2],
-                        [x1, y2]
-                    ]));
+                var compScore = scoreSum / Math.Max(1, count);
+                if (compScore < boxThresh)
+                {
+                    continue;
+                }
+
+                var mapX1 = Math.Max(0, minX);
+                var mapY1 = Math.Max(0, minY);
+                var mapX2 = Math.Min(w - 1, maxX);
+                var mapY2 = Math.Min(h - 1, maxY);
+
+                var x1 = mapX1 * imgW / w;
+                var y1 = mapY1 * imgH / h;
+                var x2 = Math.Max(x1 + 1, mapX2 * imgW / w);
+                var y2 = Math.Max(y1 + 1, mapY2 * imgH / h);
+
+                var expanded = ExpandRect(x1, y1, x2, y2, imgW, imgH, unclipRatio);
+                boxes.Add(ToBox(expanded.X1, expanded.Y1, expanded.X2, expanded.Y2, boxType));
             }
         }
 
@@ -866,6 +938,87 @@ public static class PostprocessUtils
 
         var sq = (int)Math.Sqrt(data.Length);
         return sq * sq == data.Length ? (data, sq, sq) : ([], 0, 0);
+    }
+
+    private static float[] DilateMap(float[] map, int h, int w, float thresh)
+    {
+        var result = (float[])map.Clone();
+        for (var y = 0; y < h; y++)
+        {
+            for (var x = 0; x < w; x++)
+            {
+                var idx = y * w + x;
+                if (map[idx] < thresh)
+                {
+                    continue;
+                }
+
+                for (var ny = Math.Max(0, y - 1); ny <= Math.Min(h - 1, y + 1); ny++)
+                {
+                    for (var nx = Math.Max(0, x - 1); nx <= Math.Min(w - 1, x + 1); nx++)
+                    {
+                        var nidx = ny * w + nx;
+                        if (result[nidx] < map[idx])
+                        {
+                            result[nidx] = map[idx];
+                        }
+                    }
+                }
+            }
+        }
+
+        return result;
+    }
+
+    private static (int X1, int Y1, int X2, int Y2) ExpandRect(
+        int x1,
+        int y1,
+        int x2,
+        int y2,
+        int imgW,
+        int imgH,
+        float unclipRatio)
+    {
+        var ratio = Math.Max(1f, unclipRatio);
+        var cx = (x1 + x2) / 2f;
+        var cy = (y1 + y2) / 2f;
+        var halfW = (x2 - x1 + 1) * 0.5f * ratio;
+        var halfH = (y2 - y1 + 1) * 0.5f * ratio;
+        var nx1 = Math.Clamp((int)MathF.Floor(cx - halfW), 0, Math.Max(0, imgW - 1));
+        var ny1 = Math.Clamp((int)MathF.Floor(cy - halfH), 0, Math.Max(0, imgH - 1));
+        var nx2 = Math.Clamp((int)MathF.Ceiling(cx + halfW), 0, Math.Max(0, imgW - 1));
+        var ny2 = Math.Clamp((int)MathF.Ceiling(cy + halfH), 0, Math.Max(0, imgH - 1));
+        if (nx2 <= nx1)
+        {
+            nx2 = Math.Min(imgW - 1, nx1 + 1);
+        }
+
+        if (ny2 <= ny1)
+        {
+            ny2 = Math.Min(imgH - 1, ny1 + 1);
+        }
+
+        return (nx1, ny1, nx2, ny2);
+    }
+
+    private static OcrBox ToBox(int x1, int y1, int x2, int y2, string boxType)
+    {
+        var points = boxType.Equals("poly", StringComparison.OrdinalIgnoreCase)
+            ? new[]
+            {
+                new[] { x1, y1 },
+                new[] { x2, y1 },
+                new[] { x2, y2 },
+                new[] { x1, y2 }
+            }
+            : new[]
+            {
+                new[] { x1, y1 },
+                new[] { x2, y1 },
+                new[] { x2, y2 },
+                new[] { x1, y2 }
+            };
+        return new OcrBox(points);
     }
 
     private static IEnumerable<(int X, int Y)> Neighbors(int x, int y, int w, int h)

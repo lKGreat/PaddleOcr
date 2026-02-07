@@ -15,6 +15,13 @@ Last updated: 2026-02-07
   - `infer kie`
   - `infer kie-ser`
   - `infer kie-re`
+- Upgraded `infer det` contract:
+  - DB/DB++/EAST/SAST/PSE/FCE/CT algorithm selection
+  - DET threshold/unclip/box-type/dilation/resize parameters
+  - custom result file output (`--save_res_path`)
+  - quality metrics output (`det_metrics.json`, optional GT label evaluation)
+- Added DET parity doctor gate:
+  - `doctor det-parity -c <config>`
 - Enhanced `rec` training/eval metrics:
   - full-sequence accuracy
   - character accuracy
@@ -34,4 +41,3 @@ Last updated: 2026-02-07
 1. Item 14: introduce explicit pre/post-processing registry and plugin contracts.
 2. Item 18: add deterministic-output regression tests for infer/export flows.
 3. Item 20: consolidate final acceptance report with benchmark/smoke evidence.
-

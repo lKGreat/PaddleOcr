@@ -36,6 +36,14 @@ temp/
 assets/configs/local/output/
 assets/configs/local/infer_*/
 assets/samples/pdmodel_shim/
+det_results.txt
+det_metrics.json
+det_manifest.json
+det_parity_report.json
+det_results_*/
+det_visualizations/
+**/det_train_history.jsonl
+**/det_data_audit.json
 
 # Model and dataset artifacts
 *.pdparams
@@ -62,3 +70,6 @@ packages/
 
 # Local agent/control files
 AGENTS.md
+
+# Keep tiny det fixtures tracked
+!assets/samples/tiny_det/**

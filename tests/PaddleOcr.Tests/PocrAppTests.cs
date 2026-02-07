@@ -373,6 +373,60 @@ public sealed class PocrAppTests
         code.Should().Be(0);
     }
 
+    [Fact]
+    public async Task RunAsync_DoctorDetParity_Should_Fail_Without_Config()
+    {
+        var app = new PocrApp(
+            NullLogger.Instance,
+            new ConfigLoader(),
+            new ProbeExecutor("training"),
+            new ProbeExecutor("inference"),
+            new ProbeExecutor("export"),
+            new ProbeExecutor("service"),
+            new ProbeExecutor("e2e"),
+            new ProbeExecutor("benchmark"),
+            new ProbeExecutor("plugin"));
+
+        var code = await app.RunAsync(["doctor", "det-parity"]);
+        code.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task RunAsync_DoctorDetParity_Should_Pass_For_Minimal_Det_Config()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "pocr_det_parity_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var cfg = Path.Combine(dir, "det_parity.yml");
+        await File.WriteAllTextAsync(cfg,
+            """
+            Global:
+              det_db_thresh: 0.3
+              det_db_box_thresh: 0.6
+              det_db_unclip_ratio: 1.5
+              det_limit_side_len: 640
+              det_box_type: quad
+            Architecture:
+              model_type: det
+              algorithm: DB
+            PostProcess:
+              name: DBPostProcess
+            """);
+
+        var app = new PocrApp(
+            NullLogger.Instance,
+            new ConfigLoader(),
+            new ProbeExecutor("training"),
+            new ProbeExecutor("inference"),
+            new ProbeExecutor("export"),
+            new ProbeExecutor("service"),
+            new ProbeExecutor("e2e"),
+            new ProbeExecutor("benchmark"),
+            new ProbeExecutor("plugin"));
+
+        var code = await app.RunAsync(["doctor", "det-parity", "-c", cfg]);
+        code.Should().Be(0);
+    }
+
     private static string FindRepoRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);

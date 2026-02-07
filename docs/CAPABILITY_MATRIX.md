@@ -21,7 +21,7 @@ Status keys:
 | Export | `export-onnx -c` | `tools/export_to_onnx.py` | `PaddleOcr.Export` | Done | ONNX artifact export |
 | Export | `export-center -c` | `tools/export_center.py` | `PaddleOcr.Export` | Done | Model center format |
 | Convert | `convert json2pdmodel` | `tools/convert_json_to_pdmodel.py` | `PaddleOcr.Export` | Done | Shim conversion implemented |
-| Infer | `infer det` | `tools/infer_det.py` | `PaddleOcr.Inference` | Done | ONNX path |
+| Infer | `infer det` | `tools/infer_det.py` | `PaddleOcr.Inference` | Partial | ONNX path with DB/DB++/EAST/SAST/PSE/FCE/CT and metrics output |
 | Infer | `infer rec` | `tools/infer_rec.py` | `PaddleOcr.Inference` | Done | ONNX path |
 | Infer | `infer cls` | `tools/infer_cls.py` | `PaddleOcr.Inference` | Done | ONNX path |
 | Infer | `infer system` | `tools/infer/predict_system.py` | `PaddleOcr.Inference` | Done | ONNX det+rec+cls pipeline |

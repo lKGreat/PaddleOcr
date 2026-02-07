@@ -98,12 +98,14 @@ public static class CommandLine
                  export-onnx -c <config> [-o K=V ...]
                  export-center -c <config> [-o K=V ...]
                  infer <det|rec|cls|e2e|kie|kie-ser|kie-re|table|sr|system> [-c <config>] [options]
+                   det options: [--det_algorithm DB|DB++|EAST|SAST|PSE|FCE|CT] [--det_db_thresh F] [--det_db_box_thresh F] [--det_db_unclip_ratio F] [--det_box_type quad|poly] [--det_limit_side_len N] [--det_limit_type max|min] [--use_dilation true|false] [--save_res_path <file>] [--det_gt_label <file>] [--det_eval_iou_thresh F] [--det_metrics_path <file>]
                  convert json2pdmodel --json_model_dir <dir> --output_dir <dir> --config <yml>
                  convert check-json-model --json_model_dir <dir>
                  config check -c <config>
                  config diff --base <path> --target <path>
                  doctor check-models [-c <config>] [--det_model_dir <path>] [--rec_model_dir <path>] [--cls_model_dir <path>] [--table_model_dir <path>] [--sr_model_dir <path>] [--kie_model_dir <path>]
                  doctor parity-table-kie -c <config> [--mode all|table|kie]
+                 doctor det-parity -c <config>
                  doctor train-det-ready -c <config>
                  service test --server_url <url> --image_dir <dir> [--parallel N --timeout_ms MS --retries N --stress_rounds N --dump_failures true]
                  e2e <convert-label|eval> [args]

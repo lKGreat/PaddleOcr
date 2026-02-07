@@ -25,7 +25,7 @@ This repository is a C#/.NET 10 native implementation workspace for PaddleOCR to
 - `pocr infer <det|rec|cls|e2e|kie|kie-ser|kie-re|table|sr|system> ...`
 - `pocr convert json2pdmodel ...`
 - `pocr config <check|diff> ...`
-- `pocr doctor <check-models|parity-table-kie|train-det-ready> ...`
+- `pocr doctor <check-models|parity-table-kie|train-det-ready|det-parity> ...`
 - `pocr service test --server_url ... --image_dir ...`
 - `pocr e2e <convert-label|eval> ...`
 - `pocr benchmark run --scenario ... --iterations ...`
@@ -43,3 +43,11 @@ This repository is a C#/.NET 10 native implementation workspace for PaddleOCR to
   - `scripts/replay-acceptance.ps1` (replays critical command paths and writes markdown report)
 - DET training benchmark fixture:
   - `assets/configs/local/train_bench_det_ci_fast.yml`
+- DET infer options (DB/DB++ native path):
+  - `--det_algorithm DB|DB++|EAST|SAST|PSE|FCE|CT`
+  - `--det_db_thresh --det_db_box_thresh --det_db_unclip_ratio`
+  - `--det_box_type quad|poly`
+  - `--det_limit_side_len --det_limit_type`
+  - `--use_dilation`
+  - `--save_res_path`
+  - `--det_gt_label --det_eval_iou_thresh --det_metrics_path`

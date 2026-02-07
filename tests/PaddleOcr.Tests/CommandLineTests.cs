@@ -59,6 +59,15 @@ public sealed class CommandLineTests
     }
 
     [Fact]
+    public void Parse_Should_Read_Doctor_DetParity_Subcommand()
+    {
+        var cmd = CommandLine.Parse(["doctor", "det-parity", "-c", "det.yml"]);
+        cmd.Root.Should().Be("doctor");
+        cmd.Sub.Should().Be("det-parity");
+        cmd.ConfigPath.Should().Be("det.yml");
+    }
+
+    [Fact]
     public void Parse_Should_Read_Benchmark_Subcommand()
     {
         var cmd = CommandLine.Parse(["benchmark", "run", "--scenario", "infer:system", "--iterations", "20"]);

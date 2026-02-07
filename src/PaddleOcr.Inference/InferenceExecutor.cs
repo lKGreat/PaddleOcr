@@ -146,6 +146,107 @@ public sealed class InferenceExecutor : ICommandExecutor
             return CommandResult.Fail("infer det requires --image_dir and --det_model_dir");
         }
 
+        var detAlgorithm = (ResolveString(context, "--det_algorithm", "Global.det_algorithm", "Architecture.algorithm") ?? "DB").Trim();
+        var supportedDetAlgorithms = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "DB",
+            "DB++",
+            "EAST",
+            "SAST",
+            "PSE",
+            "FCE",
+            "CT"
+        };
+        if (!supportedDetAlgorithms.Contains(detAlgorithm))
+        {
+            return CommandResult.Fail($"infer det --det_algorithm unsupported: {detAlgorithm}. expected one of DB|DB++|EAST|SAST|PSE|FCE|CT");
+        }
+
+        var detBoxType = (ResolveString(context, "--det_box_type", "Global.det_box_type") ?? "quad").Trim().ToLowerInvariant();
+        if (detBoxType is not ("quad" or "poly"))
+        {
+            return CommandResult.Fail($"infer det --det_box_type must be quad|poly, got={detBoxType}");
+        }
+
+        var detLimitType = (ResolveString(context, "--det_limit_type", "Global.det_limit_type") ?? "max").Trim().ToLowerInvariant();
+        if (detLimitType is not ("max" or "min"))
+        {
+            return CommandResult.Fail($"infer det --det_limit_type must be max|min, got={detLimitType}");
+        }
+
+        var detThresh = ParseFloat(ResolveString(context, "--det_db_thresh", "Global.det_db_thresh") ?? "0.3", 0.3f);
+        var detBoxThresh = ParseFloat(ResolveString(context, "--det_db_box_thresh", "Global.det_db_box_thresh") ?? "0.6", 0.6f);
+        var detUnclipRatio = ParseFloat(ResolveString(context, "--det_db_unclip_ratio", "Global.det_db_unclip_ratio") ?? "1.5", 1.5f);
+        var detLimitSideLen = ParseInt(ResolveString(context, "--det_limit_side_len", "Global.det_limit_side_len") ?? "640", 640, 32);
+        var useDilation = ParseBool(ResolveString(context, "--use_dilation", "Global.use_dilation") ?? "false");
+        var saveResPath = ResolveString(context, "--save_res_path", "Global.save_res_path");
+        var detEastScoreThresh = ParseFloat(ResolveString(context, "--det_east_score_thresh", "Global.det_east_score_thresh") ?? "0.8", 0.8f);
+        var detEastCoverThresh = ParseFloat(ResolveString(context, "--det_east_cover_thresh", "Global.det_east_cover_thresh") ?? "0.1", 0.1f);
+        var detEastNmsThresh = ParseFloat(ResolveString(context, "--det_east_nms_thresh", "Global.det_east_nms_thresh") ?? "0.2", 0.2f);
+        var detSastScoreThresh = ParseFloat(ResolveString(context, "--det_sast_score_thresh", "Global.det_sast_score_thresh") ?? "0.5", 0.5f);
+        var detSastNmsThresh = ParseFloat(ResolveString(context, "--det_sast_nms_thresh", "Global.det_sast_nms_thresh") ?? "0.2", 0.2f);
+        var detPseThresh = ParseFloat(ResolveString(context, "--det_pse_thresh", "Global.det_pse_thresh") ?? "0.0", 0.0f);
+        var detPseBoxThresh = ParseFloat(ResolveString(context, "--det_pse_box_thresh", "Global.det_pse_box_thresh") ?? "0.85", 0.85f);
+        var detPseMinArea = ParseFloat(ResolveString(context, "--det_pse_min_area", "Global.det_pse_min_area") ?? "16", 16f);
+        var detPseScale = ParseFloat(ResolveString(context, "--det_pse_scale", "Global.det_pse_scale") ?? "1", 1f);
+        var fceScales = ParseCsvInt(ResolveString(context, "--scales", "Global.scales") ?? "8,16,32", [8, 16, 32]);
+        var fceAlpha = ParseFloat(ResolveString(context, "--alpha", "Global.alpha") ?? "1.0", 1.0f);
+        var fceBeta = ParseFloat(ResolveString(context, "--beta", "Global.beta") ?? "1.0", 1.0f);
+        var fceFourierDegree = ParseInt(ResolveString(context, "--fourier_degree", "Global.fourier_degree") ?? "5", 5, 1);
+        var detGtLabelPath = ResolveString(context, "--det_gt_label", "Global.det_gt_label");
+        var detEvalIouThresh = ParseFloat(ResolveString(context, "--det_eval_iou_thresh", "Global.det_eval_iou_thresh") ?? "0.5", 0.5f);
+        var detMetricsPath = ResolveString(context, "--det_metrics_path", "Global.det_metrics_path");
+
+        if (!IsUnitRange(detThresh))
+        {
+            return CommandResult.Fail($"infer det --det_db_thresh must be in [0,1], got={detThresh}");
+        }
+
+        if (!IsUnitRange(detBoxThresh))
+        {
+            return CommandResult.Fail($"infer det --det_db_box_thresh must be in [0,1], got={detBoxThresh}");
+        }
+
+        if (detUnclipRatio <= 0f)
+        {
+            return CommandResult.Fail($"infer det --det_db_unclip_ratio must be > 0, got={detUnclipRatio}");
+        }
+
+        if (!IsUnitRange(detEastScoreThresh) || !IsUnitRange(detEastCoverThresh) || !IsUnitRange(detEastNmsThresh))
+        {
+            return CommandResult.Fail("infer det EAST thresholds must be in [0,1]");
+        }
+
+        if (!IsUnitRange(detSastScoreThresh) || !IsUnitRange(detSastNmsThresh))
+        {
+            return CommandResult.Fail("infer det SAST thresholds must be in [0,1]");
+        }
+
+        if (!IsUnitRange(detPseThresh) || !IsUnitRange(detPseBoxThresh))
+        {
+            return CommandResult.Fail("infer det PSE thresholds must be in [0,1]");
+        }
+
+        if (detPseMinArea <= 0f || detPseScale <= 0f)
+        {
+            return CommandResult.Fail("infer det PSE params --det_pse_min_area and --det_pse_scale must be > 0");
+        }
+
+        if (fceAlpha <= 0f || fceBeta <= 0f)
+        {
+            return CommandResult.Fail("infer det FCE params --alpha and --beta must be > 0");
+        }
+
+        if (!IsUnitRange(detEvalIouThresh))
+        {
+            return CommandResult.Fail($"infer det --det_eval_iou_thresh must be in [0,1], got={detEvalIouThresh}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(detGtLabelPath) && !File.Exists(detGtLabelPath))
+        {
+            return CommandResult.Fail($"infer det --det_gt_label not found: {detGtLabelPath}");
+        }
+
         if (!ParseBool(GetOrDefault(context, "--use_onnx", "false")))
         {
             return CommandResult.Fail("infer det currently supports --use_onnx=true only.");
@@ -157,9 +258,39 @@ public sealed class InferenceExecutor : ICommandExecutor
         }
 
         var output = ResolveOutputDir(context, "det");
-        var options = new DetOnnxOptions(imageDir, detModel, output, ParseFloat(GetOrDefault(context, "--det_db_thresh", "0.3")));
+        var options = new DetOnnxOptions(
+            imageDir,
+            detModel,
+            output,
+            detAlgorithm,
+            detThresh,
+            detBoxThresh,
+            detUnclipRatio,
+            useDilation,
+            detBoxType,
+            detLimitSideLen,
+            detLimitType,
+            saveResPath,
+            detEastScoreThresh,
+            detEastCoverThresh,
+            detEastNmsThresh,
+            detSastScoreThresh,
+            detSastNmsThresh,
+            detPseThresh,
+            detPseBoxThresh,
+            detPseMinArea,
+            detPseScale,
+            fceScales,
+            fceAlpha,
+            fceBeta,
+            fceFourierDegree,
+            detGtLabelPath,
+            detEvalIouThresh,
+            detMetricsPath);
         new DetOnnxRunner().Run(options);
-        return CommandResult.Ok($"infer det completed. output={output}");
+        var resultFile = string.IsNullOrWhiteSpace(saveResPath) ? Path.Combine(output, "det_results.txt") : saveResPath;
+        var metricsFile = string.IsNullOrWhiteSpace(detMetricsPath) ? Path.Combine(output, "det_metrics.json") : detMetricsPath;
+        return CommandResult.Ok($"infer det completed. output={output}, result={resultFile}, metrics={metricsFile}");
     }
 
     private static CommandResult RunRec(PaddleOcr.Core.Cli.ExecutionContext context)
@@ -432,11 +563,38 @@ public sealed class InferenceExecutor : ICommandExecutor
         return bool.TryParse(text, out var value) && value;
     }
 
-    private static float ParseFloat(string text)
+    private static float ParseFloat(string text, float defaultValue = 0f)
     {
         return float.TryParse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var value)
             ? value
-            : 0f;
+            : defaultValue;
+    }
+
+    private static int ParseInt(string text, int defaultValue, int minValue)
+    {
+        if (!int.TryParse(text, out var value))
+        {
+            value = defaultValue;
+        }
+
+        return Math.Max(minValue, value);
+    }
+
+    private static bool IsUnitRange(float value)
+    {
+        return value >= 0f && value <= 1f;
+    }
+
+    private static IReadOnlyList<int> ParseCsvInt(string text, IReadOnlyList<int> fallback)
+    {
+        var values = text
+            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .Select(x => int.TryParse(x, out var n) ? n : 0)
+            .Where(x => x > 0)
+            .Distinct()
+            .OrderBy(x => x)
+            .ToList();
+        return values.Count == 0 ? fallback : values;
     }
 
     private static IReadOnlyList<string> ParseCsv(string text)
