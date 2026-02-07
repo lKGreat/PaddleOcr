@@ -36,6 +36,21 @@ public static class LRSchedulerBuilder
                 maxEpochs: GetInt(config, "max_epochs", 100),
                 power: GetFloat(config, "power", 1.0f)
             ),
+            "exponential" or "exponentialdecay" => new ExponentialDecay(
+                initialLr: GetFloat(config, "initial_lr", 0.001f),
+                gamma: GetFloat(config, "gamma", 0.95f)
+            ),
+            "noam" or "noamdecay" => new NoamDecay(
+                dModel: GetInt(config, "d_model", 512),
+                warmupSteps: GetInt(config, "warmup_steps", 4000),
+                learningRate: GetFloat(config, "learning_rate", 0f)
+            ),
+            "cyclicalcosine" or "cyclicalcosinedecay" or "cycliccosine" => new CyclicalCosineDecay(
+                initialLr: GetFloat(config, "initial_lr", 0.001f),
+                minLr: GetFloat(config, "min_lr", 0.0001f),
+                cycleLength: GetInt(config, "cycle_length", 50),
+                decayFactor: GetFloat(config, "decay_factor", 0.5f)
+            ),
             _ => new CosineAnnealingDecay(0.001f, 0.0001f, 100)
         };
     }
