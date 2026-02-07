@@ -8,7 +8,7 @@ namespace PaddleOcr.Tests;
 public sealed class ExportTests
 {
     [Fact]
-    public void ExportNative_Should_Copy_Checkpoint_And_Write_Manifest()
+    public void ExportNative_Should_Create_Paddle_Infer_Files_And_Write_Manifest()
     {
         var root = Path.Combine(Path.GetTempPath(), "pocr_export_test_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
@@ -24,22 +24,26 @@ public sealed class ExportTests
             ["Architecture"] = new Dictionary<string, object?> { ["model_type"] = "cls" },
             ["Global"] = new Dictionary<string, object?>
             {
-                ["save_model_dir"] = "./out",
-                ["save_inference_dir"] = "./infer"
+                ["save_model_dir"] = modelDir,
+                ["save_inference_dir"] = Path.Combine(root, "infer")
             }
         }, cfgPath);
 
         var exporter = new NativeExporter(NullLogger.Instance);
         var target = exporter.ExportNative(cfg);
+        var inferDir = Path.GetDirectoryName(target)!;
 
         File.Exists(target).Should().BeTrue();
-        File.Exists(Path.Combine(root, "infer", "manifest.json")).Should().BeTrue();
+        File.Exists(Path.Combine(inferDir, "inference.json")).Should().BeTrue();
+        File.Exists(Path.Combine(inferDir, "inference.pdiparams")).Should().BeTrue();
+        File.Exists(Path.Combine(inferDir, "inference.yml")).Should().BeTrue();
+        File.Exists(Path.Combine(inferDir, "manifest.json")).Should().BeTrue();
 
-        var manifestJson = File.ReadAllText(Path.Combine(root, "infer", "manifest.json"));
+        var manifestJson = File.ReadAllText(Path.Combine(inferDir, "manifest.json"));
         using var doc = JsonDocument.Parse(manifestJson);
         doc.RootElement.GetProperty("SchemaVersion").GetString().Should().Be("1.0");
-        doc.RootElement.GetProperty("Format").GetString().Should().Be("torchsharp-native");
-        doc.RootElement.GetProperty("ArtifactFile").GetString().Should().Be("model.pt");
+        doc.RootElement.GetProperty("Format").GetString().Should().Be("paddle-infer-shim");
+        doc.RootElement.GetProperty("ArtifactFile").GetString().Should().Be("inference.pdiparams");
         doc.RootElement.GetProperty("Compatibility").GetProperty("ManifestSemVer").GetString().Should().Be("1.x");
         doc.RootElement.GetProperty("OnnxInputs").ValueKind.Should().Be(JsonValueKind.Array);
         doc.RootElement.GetProperty("OnnxOutputs").ValueKind.Should().Be(JsonValueKind.Array);

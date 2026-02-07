@@ -17,7 +17,9 @@ public sealed class ExportConfigView
     public string? Checkpoints => ResolvePathOrNull(GetStringOrNull("Global.checkpoints"));
     public string? PretrainedModel => ResolvePathOrNull(GetStringOrNull("Global.pretrained_model"));
     public IReadOnlyList<string> LabelList => GetStringList("Global.label_list");
-    public string? RecCharDictPath => ResolvePathOrNull(GetStringOrNull("Global.rec_char_dict_path"));
+    public string? RecCharDictPath => ResolvePathOrNull(
+        GetStringOrNull("Global.rec_char_dict_path") ??
+        GetStringOrNull("Global.character_dict_path"));
     public int DetInputSize => GetDetInputSize();
     public IReadOnlyList<int> ClsImageShape => GetClsImageShape();
 
@@ -106,7 +108,27 @@ public sealed class ExportConfigView
         return [3, 48, 192];
     }
 
-    private string ResolvePath(string path) => Path.IsPathRooted(path) ? path : Path.GetFullPath(Path.Combine(_configDir, path));
+    private string ResolvePath(string path)
+    {
+        if (Path.IsPathRooted(path))
+        {
+            return path;
+        }
+
+        var fromCwd = Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), path));
+        if (File.Exists(fromCwd) || Directory.Exists(fromCwd))
+        {
+            return fromCwd;
+        }
+
+        var fromConfig = Path.GetFullPath(Path.Combine(_configDir, path));
+        if (File.Exists(fromConfig) || Directory.Exists(fromConfig))
+        {
+            return fromConfig;
+        }
+
+        return fromCwd;
+    }
 
     private string? ResolvePathOrNull(string? path)
     {
