@@ -39,3 +39,5 @@ This repository is a C#/.NET 10 native implementation workspace for PaddleOCR to
 - Runtime plugin loading is trust-validated by default (`--allow_untrusted true` to bypass).
 - CI-fast smoke script:
   - `scripts/smoke-ci-fast.ps1` (runs config/doctor checks for local `table`/`kie` tiny configs)
+- Acceptance replay script:
+  - `scripts/replay-acceptance.ps1` (replays critical command paths and writes markdown report)

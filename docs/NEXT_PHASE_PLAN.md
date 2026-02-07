@@ -29,3 +29,5 @@ Last updated: 2026-02-07
 - done: Added plugin trust metadata validation (`trust` + SHA-256 checks + verify-trust command) and default trusted runtime loading mode.
 - done: Added `doctor parity-table-kie` production parity gate for table/kie required artifacts.
 - done: Published baseline benchmark report under `docs/benchmarks/` with train/e2e baseline numbers.
+- done: Added acceptance replay automation script for critical command paths (`scripts/replay-acceptance.ps1`).
+- done: Published phase handoff + risk register update (`docs/PHASE_HANDOFF_2026-02-07.md`).

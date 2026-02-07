@@ -22,5 +22,5 @@ Status: `done` / `in_progress` / `pending`
 16. done - Plugin signature/trust metadata validation
 17. done - Table/KIE production parity checklist closure
 18. done - Bench baseline report publication (`docs/benchmarks/*.md`)
-19. pending - End-to-end acceptance replay script for all critical commands
-20. pending - Phase handoff report and risk register update
+19. done - End-to-end acceptance replay script for all critical commands
+20. done - Phase handoff report and risk register update
