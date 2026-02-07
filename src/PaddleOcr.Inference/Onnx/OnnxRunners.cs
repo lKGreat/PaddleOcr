@@ -257,6 +257,134 @@ public sealed class SrOnnxRunner
     }
 }
 
+public sealed class TableOnnxRunner
+{
+    public void Run(TableOnnxOptions options)
+    {
+        var imageFiles = OnnxRuntimeUtils.EnumerateImages(options.ImageDir).ToList();
+        if (imageFiles.Count == 0)
+        {
+            throw new InvalidOperationException($"No image found in: {options.ImageDir}");
+        }
+
+        Directory.CreateDirectory(options.OutputDir);
+        using var table = new InferenceSession(options.TableModelPath);
+        using var det = options.DetModelPath is null ? null : new InferenceSession(options.DetModelPath);
+        using var rec = options.RecModelPath is null ? null : new InferenceSession(options.RecModelPath);
+        var charset = CharsetLoader.Load(options.RecCharDictPath, options.UseSpaceChar);
+
+        var lines = new List<string>(imageFiles.Count);
+        foreach (var file in imageFiles)
+        {
+            using var image = Image.Load<Rgb24>(file);
+            var tableOutputs = OnnxRuntimeUtils.RunSession(table, image, image.Height, image.Width);
+            var ocr = OcrPipelineHelper.ExtractOcrItems(image, file, det, rec, charset, options.DropScore, options.DetThresh);
+            var payload = new
+            {
+                table_tensors = tableOutputs.Select((x, i) => new { index = i, dims = x.Dims, size = x.Data.Length }).ToList(),
+                ocr = ocr.Select(x => new { text = x.Transcription, score = x.Score, points = x.Points }).ToList()
+            };
+            lines.Add($"{Path.GetFileName(file)}\t{JsonSerializer.Serialize(payload)}");
+            if (ocr.Count > 0)
+            {
+                OnnxRuntimeUtils.SaveVisualization(
+                    file,
+                    ocr.Select(x => new OcrBox(x.Points)).ToList(),
+                    options.OutputDir,
+                    ocr.Select(x => x.Transcription).ToList(),
+                    ocr.Select(x => x.Score).ToList());
+            }
+        }
+
+        File.WriteAllLines(Path.Combine(options.OutputDir, "table_results.txt"), lines);
+    }
+}
+
+public sealed class KieOnnxRunner
+{
+    public void Run(KieOnnxOptions options)
+    {
+        var imageFiles = OnnxRuntimeUtils.EnumerateImages(options.ImageDir).ToList();
+        if (imageFiles.Count == 0)
+        {
+            throw new InvalidOperationException($"No image found in: {options.ImageDir}");
+        }
+
+        Directory.CreateDirectory(options.OutputDir);
+        using var kie = new InferenceSession(options.KieModelPath);
+        using var det = options.DetModelPath is null ? null : new InferenceSession(options.DetModelPath);
+        using var rec = options.RecModelPath is null ? null : new InferenceSession(options.RecModelPath);
+        var charset = CharsetLoader.Load(options.RecCharDictPath, options.UseSpaceChar);
+
+        var lines = new List<string>(imageFiles.Count);
+        foreach (var file in imageFiles)
+        {
+            using var image = Image.Load<Rgb24>(file);
+            var tensors = OnnxRuntimeUtils.RunSession(kie, image, image.Height, image.Width);
+            var ocr = OcrPipelineHelper.ExtractOcrItems(image, file, det, rec, charset, options.DropScore, options.DetThresh);
+            var payload = new
+            {
+                task = options.TaskName,
+                tensors = tensors.Select((x, i) => new { index = i, dims = x.Dims, size = x.Data.Length }).ToList(),
+                ocr = ocr.Select(x => new { text = x.Transcription, score = x.Score, points = x.Points }).ToList()
+            };
+            lines.Add($"{Path.GetFileName(file)}\t{JsonSerializer.Serialize(payload)}");
+        }
+
+        File.WriteAllLines(Path.Combine(options.OutputDir, $"{options.TaskName}_results.txt"), lines);
+    }
+}
+
+internal static class OcrPipelineHelper
+{
+    public static List<OcrItem> ExtractOcrItems(
+        Image<Rgb24> original,
+        string imagePath,
+        InferenceSession? det,
+        InferenceSession? rec,
+        IReadOnlyList<string> charset,
+        float dropScore,
+        float detThresh)
+    {
+        if (rec is null)
+        {
+            return [];
+        }
+
+        var boxes = det is null
+            ? [PostprocessUtils.FullImageBox(original.Width, original.Height)]
+            : GetBoxes(det, imagePath, original.Width, original.Height, detThresh);
+        var sorted = PostprocessUtils.SortBoxes(boxes);
+        var result = new List<OcrItem>(sorted.Count);
+        foreach (var box in sorted)
+        {
+            using var crop = OnnxRuntimeUtils.CropBox(original, box);
+            var recOut = OnnxRuntimeUtils.RunSession(rec, crop, 48, 320).FirstOrDefault();
+            var recRes = recOut is null
+                ? new RecResult(string.Empty, 0f)
+                : PostprocessUtils.DecodeRecCtc(recOut.Data, recOut.Dims, charset);
+            if (!string.IsNullOrWhiteSpace(recRes.Text) && recRes.Score >= dropScore)
+            {
+                result.Add(new OcrItem(recRes.Text, box.Points, recRes.Score));
+            }
+        }
+
+        return result;
+    }
+
+    private static List<OcrBox> GetBoxes(InferenceSession det, string imagePath, int width, int height, float thresh)
+    {
+        var detOut = OnnxRuntimeUtils.RunSession(det, imagePath, 640, 640).FirstOrDefault();
+        if (detOut is null)
+        {
+            return [PostprocessUtils.FullImageBox(width, height)];
+        }
+
+        var boxes = PostprocessUtils.DetectBoxes(detOut.Data, detOut.Dims, width, height, thresh);
+        return boxes.Count == 0 ? [PostprocessUtils.FullImageBox(width, height)] : boxes;
+    }
+}
+
 public sealed record TensorOutput(float[] Data, int[] Dims);
 
 public sealed record DetOnnxOptions(string ImageDir, string DetModelPath, string OutputDir, float DetThresh);
@@ -290,6 +418,27 @@ public sealed record SystemOnnxOptions(
     float DetThresh);
 
 public sealed record SrOnnxOptions(string ImageDir, string SrModelPath, string OutputDir);
+public sealed record TableOnnxOptions(
+    string ImageDir,
+    string TableModelPath,
+    string OutputDir,
+    string? DetModelPath,
+    string? RecModelPath,
+    string? RecCharDictPath,
+    bool UseSpaceChar,
+    float DropScore,
+    float DetThresh);
+public sealed record KieOnnxOptions(
+    string TaskName,
+    string ImageDir,
+    string KieModelPath,
+    string OutputDir,
+    string? DetModelPath,
+    string? RecModelPath,
+    string? RecCharDictPath,
+    bool UseSpaceChar,
+    float DropScore,
+    float DetThresh);
 
 public sealed record OcrItem(string Transcription, int[][] Points, float Score);
 public sealed record OcrBox(int[][] Points);

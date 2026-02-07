@@ -62,6 +62,26 @@ public sealed class InferenceExecutor : ICommandExecutor
             return Task.FromResult(RunSr(context));
         }
 
+        if (subCommand.Equals("table", StringComparison.OrdinalIgnoreCase))
+        {
+            return Task.FromResult(RunTable(context));
+        }
+
+        if (subCommand.Equals("kie", StringComparison.OrdinalIgnoreCase))
+        {
+            return Task.FromResult(RunKie(context, "kie", "kie", "--kie_model_dir"));
+        }
+
+        if (subCommand.Equals("kie-ser", StringComparison.OrdinalIgnoreCase))
+        {
+            return Task.FromResult(RunKie(context, "kie-ser", "kie_ser", "--ser_model_dir"));
+        }
+
+        if (subCommand.Equals("kie-re", StringComparison.OrdinalIgnoreCase))
+        {
+            return Task.FromResult(RunKie(context, "kie-re", "kie_re", "--re_model_dir"));
+        }
+
         context.Logger.LogInformation("Running infer {Mode}", subCommand);
         return Task.FromResult(CommandResult.Ok($"infer {subCommand} scaffold executed."));
     }
@@ -268,6 +288,75 @@ public sealed class InferenceExecutor : ICommandExecutor
         var options = new SrOnnxOptions(imageDir, srModel, output);
         new SrOnnxRunner().Run(options);
         return CommandResult.Ok($"infer sr completed. output={output}");
+    }
+
+    private static CommandResult RunTable(PaddleOcr.Core.Cli.ExecutionContext context)
+    {
+        var imageDir = GetOrNull(context, "--image_dir");
+        var tableModel = GetOrNull(context, "--table_model_dir");
+        if (string.IsNullOrWhiteSpace(imageDir) || string.IsNullOrWhiteSpace(tableModel))
+        {
+            return CommandResult.Fail("infer table requires --image_dir and --table_model_dir");
+        }
+
+        if (!ParseBool(GetOrDefault(context, "--use_onnx", "false")))
+        {
+            return CommandResult.Fail("infer table currently supports --use_onnx=true only.");
+        }
+
+        if (!File.Exists(tableModel))
+        {
+            return CommandResult.Fail($"table model not found: {tableModel}");
+        }
+
+        var output = GetOrDefault(context, "--draw_img_save_dir", "./inference_results");
+        var options = new TableOnnxOptions(
+            imageDir,
+            tableModel,
+            output,
+            GetOrNull(context, "--det_model_dir"),
+            GetOrNull(context, "--rec_model_dir"),
+            GetOrNull(context, "--rec_char_dict_path"),
+            ParseBool(GetOrDefault(context, "--use_space_char", "true")),
+            ParseFloat(GetOrDefault(context, "--drop_score", "0.5")),
+            ParseFloat(GetOrDefault(context, "--det_db_thresh", "0.3")));
+        new TableOnnxRunner().Run(options);
+        return CommandResult.Ok($"infer table completed. output={output}");
+    }
+
+    private static CommandResult RunKie(PaddleOcr.Core.Cli.ExecutionContext context, string commandName, string taskName, string modelArg)
+    {
+        var imageDir = GetOrNull(context, "--image_dir");
+        var modelPath = GetOrNull(context, modelArg);
+        if (string.IsNullOrWhiteSpace(imageDir) || string.IsNullOrWhiteSpace(modelPath))
+        {
+            return CommandResult.Fail($"infer {commandName} requires --image_dir and {modelArg}");
+        }
+
+        if (!ParseBool(GetOrDefault(context, "--use_onnx", "false")))
+        {
+            return CommandResult.Fail($"infer {commandName} currently supports --use_onnx=true only.");
+        }
+
+        if (!File.Exists(modelPath))
+        {
+            return CommandResult.Fail($"{commandName} model not found: {modelPath}");
+        }
+
+        var output = GetOrDefault(context, "--draw_img_save_dir", "./inference_results");
+        var options = new KieOnnxOptions(
+            taskName,
+            imageDir,
+            modelPath,
+            output,
+            GetOrNull(context, "--det_model_dir"),
+            GetOrNull(context, "--rec_model_dir"),
+            GetOrNull(context, "--rec_char_dict_path"),
+            ParseBool(GetOrDefault(context, "--use_space_char", "true")),
+            ParseFloat(GetOrDefault(context, "--drop_score", "0.5")),
+            ParseFloat(GetOrDefault(context, "--det_db_thresh", "0.3")));
+        new KieOnnxRunner().Run(options);
+        return CommandResult.Ok($"infer {commandName} completed. output={output}");
     }
 
     private static string? GetOrNull(PaddleOcr.Core.Cli.ExecutionContext context, string key)
