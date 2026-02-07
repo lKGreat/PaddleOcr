@@ -16,13 +16,13 @@ todos:
     status: completed
   - id: phase5-backbones-necks-heads
     content: "Phase 5: TorchSharp 网络组件 - Backbones(15+)/Necks(5)/Heads(18+)/RecModelBuilder"
-    status: in_progress
+    status: completed
   - id: phase6-losses
     content: "Phase 6: 损失函数 - CTCLoss/AttentionLoss/SARLoss/NRTRLoss/MultiLoss 等 15+ 损失函数 + RecLossBuilder"
-    status: pending
+    status: completed
   - id: phase7-training-infra
     content: "Phase 7: 训练基础设施 - LR 调度器、AMP、模型平均、蒸馏、数据增强、多尺度数据集"
-    status: pending
+    status: completed
   - id: phase8-config-trainer
     content: "Phase 8: ConfigDrivenRecTrainer - 配置驱动训练器，替代 SimpleRecTrainer，支持所有高级特性"
     status: pending
