@@ -40,5 +40,22 @@ public sealed class ConfigTests
         global["epoch_num"].Should().Be(20);
         global["save_model_dir"].Should().Be("./output");
     }
-}
 
+    [Fact]
+    public void ConfigValidator_Diff_Should_Report_Changed_Field()
+    {
+        var a = new Dictionary<string, object?>
+        {
+            ["Global"] = new Dictionary<string, object?> { ["epoch_num"] = 1 },
+            ["Architecture"] = new Dictionary<string, object?> { ["model_type"] = "cls" }
+        };
+        var b = new Dictionary<string, object?>
+        {
+            ["Global"] = new Dictionary<string, object?> { ["epoch_num"] = 2 },
+            ["Architecture"] = new Dictionary<string, object?> { ["model_type"] = "cls" }
+        };
+
+        var diffs = ConfigValidator.Diff(a, b);
+        diffs.Should().ContainSingle(x => x.Contains("Global.epoch_num"));
+    }
+}

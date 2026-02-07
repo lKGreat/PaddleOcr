@@ -86,6 +86,7 @@ public sealed class ClsOnnxRunner
 
         Directory.CreateDirectory(options.OutputDir);
         using var cls = new InferenceSession(options.ClsModelPath);
+        var clsPost = InferenceComponentRegistry.GetClsPostprocessor();
 
         var lines = new List<string>(imageFiles.Count);
         foreach (var file in imageFiles)
@@ -94,7 +95,7 @@ public sealed class ClsOnnxRunner
             var output = OnnxRuntimeUtils.RunSession(cls, img, 48, 192).FirstOrDefault();
             var clsRes = output is null
                 ? new ClsResult(options.LabelList.FirstOrDefault() ?? "0", 0f)
-                : PostprocessUtils.DecodeCls(output.Data, options.LabelList);
+                : clsPost(output.Data, options.LabelList);
             var payload = new[]
             {
                 new { label = clsRes.Label, score = clsRes.Score }
@@ -485,7 +486,8 @@ public static class OnnxRuntimeUtils
     public static List<TensorOutput> RunSession(InferenceSession session, Image<Rgb24> image, int defaultH, int defaultW)
     {
         var input = session.InputMetadata.First();
-        var tensor = BuildTensor(image, input.Value.Dimensions, defaultH, defaultW);
+        var builder = InferencePreprocessRegistry.GetInputBuilder();
+        var tensor = builder(image, input.Value.Dimensions, defaultH, defaultW);
         var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(input.Key, tensor) };
         using var outputs = session.Run(inputs);
         var result = new List<TensorOutput>(outputs.Count);
@@ -563,31 +565,6 @@ public static class OnnxRuntimeUtils
                 yield return file;
             }
         }
-    }
-
-    private static DenseTensor<float> BuildTensor(Image<Rgb24> src, IReadOnlyList<int> dims, int defaultH, int defaultW)
-    {
-        var n = dims.Count > 0 && dims[0] > 0 ? dims[0] : 1;
-        var c = dims.Count > 1 && dims[1] > 0 ? dims[1] : 3;
-        var h = dims.Count > 2 && dims[2] > 0 ? dims[2] : defaultH;
-        var w = dims.Count > 3 && dims[3] > 0 ? dims[3] : defaultW;
-
-        using var img = src.Clone();
-        img.Mutate(x => x.Resize(w, h));
-
-        var tensor = new DenseTensor<float>([n, c, h, w]);
-        for (var y = 0; y < h; y++)
-        {
-            for (var x = 0; x < w; x++)
-            {
-                var p = img[x, y];
-                tensor[0, 0, y, x] = p.R / 255f;
-                tensor[0, 1, y, x] = p.G / 255f;
-                tensor[0, 2, y, x] = p.B / 255f;
-            }
-        }
-
-        return tensor;
     }
 
     private static void DrawPolygon(Image<Rgb24> img, int[][] points, Rgb24 color)

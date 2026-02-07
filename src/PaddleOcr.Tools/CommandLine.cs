@@ -102,6 +102,7 @@ public static class CommandLine
                  convert check-json-model --json_model_dir <dir>
                  config check -c <config>
                  config diff --base <path> --target <path>
+                 doctor check-models [-c <config>] [--det_model_dir <path>] [--rec_model_dir <path>] [--cls_model_dir <path>] [--table_model_dir <path>] [--sr_model_dir <path>] [--kie_model_dir <path>]
                  service test --server_url <url> --image_dir <dir> [--parallel N --timeout_ms MS --retries N --stress_rounds N --dump_failures true]
                  e2e <convert-label|eval> [args]
                """;
@@ -112,6 +113,7 @@ public static class CommandLine
         return root.Equals("infer", StringComparison.OrdinalIgnoreCase)
             || root.Equals("convert", StringComparison.OrdinalIgnoreCase)
             || root.Equals("config", StringComparison.OrdinalIgnoreCase)
+            || root.Equals("doctor", StringComparison.OrdinalIgnoreCase)
             || root.Equals("service", StringComparison.OrdinalIgnoreCase)
             || root.Equals("e2e", StringComparison.OrdinalIgnoreCase);
     }

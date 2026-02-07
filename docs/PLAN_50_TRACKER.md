@@ -44,13 +44,13 @@ Status: `done` / `in_progress` / `pending`
 38. done - E2E convert-label tolerant parsing fallback
 39. done - Config schema basic validator (`config check`)
 40. done - Config diff tool (`config diff`)
-41. pending
-42. pending
-43. pending
-44. pending
-45. pending
-46. pending
-47. pending
-48. pending
-49. pending
-50. pending
+41. done - Preprocess registry (`InferencePreprocessRegistry`)
+42. done - Extended postprocess registry (det/rec/cls)
+43. done - Health command (`doctor check-models`)
+44. done - Additional CLI contract tests expansion
+45. done - Deterministic infer-postprocess regression test
+46. done - Export manifest regression assertions
+47. done - Path resolution compatibility test
+48. done - Gitignore audit report
+49. done - Delivery evidence report
+50. done - Next phase milestone plan

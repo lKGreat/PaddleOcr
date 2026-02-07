@@ -51,6 +51,22 @@ public sealed class PostprocessUtilsTests
     }
 
     [Fact]
+    public void DetectBoxes_Should_Be_Deterministic_For_Same_Input()
+    {
+        var map = new float[]
+        {
+            0,0,0,0,
+            0,1,1,0,
+            0,1,1,0,
+            0,0,0,0
+        };
+
+        var a = PostprocessUtils.DetectBoxes(map, [1, 1, 4, 4], 400, 200, 0.5f);
+        var b = PostprocessUtils.DetectBoxes(map, [1, 1, 4, 4], 400, 200, 0.5f);
+        a.Should().BeEquivalentTo(b);
+    }
+
+    [Fact]
     public void SortBoxes_Should_Order_By_TopThenLeft()
     {
         var boxes = new List<OcrBox>

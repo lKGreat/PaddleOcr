@@ -29,5 +29,13 @@ public sealed class CommandLineTests
         cmd.Sub.Should().Be("system");
         cmd.Options["--image_dir"].Should().Be("./imgs");
     }
-}
 
+    [Fact]
+    public void Parse_Should_Read_Doctor_Subcommand()
+    {
+        var cmd = CommandLine.Parse(["doctor", "check-models", "--det_model_dir", "a.onnx"]);
+        cmd.Root.Should().Be("doctor");
+        cmd.Sub.Should().Be("check-models");
+        cmd.Options["--det_model_dir"].Should().Be("a.onnx");
+    }
+}

@@ -40,6 +40,9 @@ public sealed class ExportTests
         doc.RootElement.GetProperty("SchemaVersion").GetString().Should().Be("1.0");
         doc.RootElement.GetProperty("Format").GetString().Should().Be("torchsharp-native");
         doc.RootElement.GetProperty("ArtifactFile").GetString().Should().Be("model.pt");
+        doc.RootElement.GetProperty("Compatibility").GetProperty("ManifestSemVer").GetString().Should().Be("1.x");
+        doc.RootElement.GetProperty("OnnxInputs").ValueKind.Should().Be(JsonValueKind.Array);
+        doc.RootElement.GetProperty("OnnxOutputs").ValueKind.Should().Be(JsonValueKind.Array);
     }
 
     [Fact]

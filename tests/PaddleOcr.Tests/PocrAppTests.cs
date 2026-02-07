@@ -122,4 +122,20 @@ public sealed class PocrAppTests
         var code = await app.RunAsync(["config", "diff", "--base", a, "--target", b]);
         code.Should().Be(0);
     }
+
+    [Fact]
+    public async Task RunAsync_DoctorCheckModels_Should_Fail_When_File_Missing()
+    {
+        var app = new PocrApp(
+            NullLogger.Instance,
+            new ConfigLoader(),
+            new ProbeExecutor("training"),
+            new ProbeExecutor("inference"),
+            new ProbeExecutor("export"),
+            new ProbeExecutor("service"),
+            new ProbeExecutor("e2e"));
+
+        var code = await app.RunAsync(["doctor", "check-models", "--det_model_dir", "not_exists.onnx"]);
+        code.Should().Be(2);
+    }
 }
