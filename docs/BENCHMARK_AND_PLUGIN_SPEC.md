@@ -20,6 +20,11 @@ Output:
   - `balanced`: `parallel=4`, `timeout_ms=15000`, `retries=1`, `stress_rounds=2`
   - `stress`: `parallel=8`, `timeout_ms=20000`, `retries=2`, `stress_rounds=5`
 
+Training benchmark fixture:
+- `assets/configs/local/train_bench_rec_ci_fast.yml`
+- Example:
+  - `pocr benchmark run --scenario train:train -c assets/configs/local/train_bench_rec_ci_fast.yml --warmup 0 --iterations 1`
+
 ## Plugin package command
 
 Command:
