@@ -23,17 +23,9 @@ public sealed class NativeExporter
 
         var target = Path.Combine(cfg.SaveInferenceDir, "model.pt");
         File.Copy(ckpt, target, overwrite: true);
-        WriteManifest(cfg.SaveInferenceDir, new
-        {
-            format = "torchsharp-native",
-            model_type = cfg.ModelType,
-            checkpoint = ckpt,
-            labels = cfg.LabelList,
-            rec_char_dict_path = cfg.RecCharDictPath,
-            cls_image_shape = cfg.ClsImageShape,
-            det_input_size = cfg.DetInputSize,
-            exported_at = DateTime.UtcNow
-        });
+        WriteManifest(
+            cfg.SaveInferenceDir,
+            BuildManifest(cfg, "torchsharp-native", DateTime.UtcNow, "model.pt", ckpt, null, null));
         _logger.LogInformation("Exported native model: {Path}", target);
         return target;
     }
@@ -49,17 +41,9 @@ public sealed class NativeExporter
 
         var target = Path.Combine(cfg.SaveInferenceDir, "inference.onnx");
         File.Copy(onnx, target, overwrite: true);
-        WriteManifest(cfg.SaveInferenceDir, new
-        {
-            format = "onnx",
-            model_type = cfg.ModelType,
-            source = onnx,
-            labels = cfg.LabelList,
-            rec_char_dict_path = cfg.RecCharDictPath,
-            cls_image_shape = cfg.ClsImageShape,
-            det_input_size = cfg.DetInputSize,
-            exported_at = DateTime.UtcNow
-        });
+        WriteManifest(
+            cfg.SaveInferenceDir,
+            BuildManifest(cfg, "onnx", DateTime.UtcNow, "inference.onnx", null, onnx, null));
         _logger.LogInformation("Exported ONNX model: {Path}", target);
         return target;
     }
@@ -84,12 +68,21 @@ public sealed class NativeExporter
         File.Copy(srcJson, dstModel, overwrite: true);
         File.Copy(srcParams, dstParams, overwrite: true);
 
-        WriteManifest(outputDir, new
-        {
-            format = "pdmodel-shim",
-            source = jsonModelDir,
-            converted_at = DateTime.UtcNow
-        });
+        WriteManifest(
+            outputDir,
+            new ExportManifest(
+                SchemaVersion: "1.0",
+                Format: "pdmodel-shim",
+                ModelType: "unknown",
+                CreatedAtUtc: DateTime.UtcNow,
+                ArtifactFile: "inference.pdmodel",
+                Checkpoint: null,
+                Source: jsonModelDir,
+                SourceDirectory: jsonModelDir,
+                LabelList: [],
+                RecCharDictPath: null,
+                ClsImageShape: [],
+                DetInputSize: null));
         _logger.LogInformation("Converted json model dir to pdmodel shim: {Dir}", outputDir);
         return dstModel;
     }
@@ -98,6 +91,30 @@ public sealed class NativeExporter
     {
         var json = JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true });
         File.WriteAllText(Path.Combine(dir, "manifest.json"), json);
+    }
+
+    private static ExportManifest BuildManifest(
+        ExportConfigView cfg,
+        string format,
+        DateTime createdAtUtc,
+        string artifactFile,
+        string? checkpoint,
+        string? source,
+        string? sourceDirectory)
+    {
+        return new ExportManifest(
+            SchemaVersion: "1.0",
+            Format: format,
+            ModelType: cfg.ModelType,
+            CreatedAtUtc: createdAtUtc,
+            ArtifactFile: artifactFile,
+            Checkpoint: checkpoint,
+            Source: source,
+            SourceDirectory: sourceDirectory,
+            LabelList: cfg.LabelList,
+            RecCharDictPath: cfg.RecCharDictPath,
+            ClsImageShape: cfg.ClsImageShape,
+            DetInputSize: cfg.DetInputSize);
     }
 
     private static string ResolveCheckpoint(ExportConfigView cfg)
@@ -147,3 +164,17 @@ public sealed class NativeExporter
         return null;
     }
 }
+
+public sealed record ExportManifest(
+    string SchemaVersion,
+    string Format,
+    string ModelType,
+    DateTime CreatedAtUtc,
+    string ArtifactFile,
+    string? Checkpoint,
+    string? Source,
+    string? SourceDirectory,
+    IReadOnlyList<string> LabelList,
+    string? RecCharDictPath,
+    IReadOnlyList<int> ClsImageShape,
+    int? DetInputSize);

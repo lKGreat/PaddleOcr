@@ -52,16 +52,18 @@ internal sealed class SimpleRecTrainer
             }
 
             var trainLoss = sampleCount == 0 ? 0f : lossSum / sampleCount;
-            var evalAcc = Evaluate(model, evalSet, cfg.EvalBatchSize, shape.H, shape.W, cfg.MaxTextLength, dev, vocab);
+            var evalMetrics = Evaluate(model, evalSet, cfg.EvalBatchSize, shape.H, shape.W, cfg.MaxTextLength, dev, vocab);
 
-            if (evalAcc > bestAcc)
+            if (evalMetrics.Accuracy > bestAcc)
             {
-                bestAcc = evalAcc;
+                bestAcc = evalMetrics.Accuracy;
                 SaveCheckpoint(cfg.SaveModelDir, model, "best.pt");
             }
 
             SaveCheckpoint(cfg.SaveModelDir, model, "latest.pt");
-            _logger.LogInformation("epoch={Epoch}/{Total} train_loss={Loss:F4} eval_acc={EvalAcc:F4}", epoch, cfg.EpochNum, trainLoss, evalAcc);
+            _logger.LogInformation(
+                "epoch={Epoch}/{Total} train_loss={Loss:F4} eval_acc={EvalAcc:F4} eval_char_acc={CharAcc:F4} eval_edit={Edit:F4}",
+                epoch, cfg.EpochNum, trainLoss, evalMetrics.Accuracy, evalMetrics.CharacterAccuracy, evalMetrics.AvgEditDistance);
         }
 
         var summary = new TrainingSummary(cfg.EpochNum, bestAcc, cfg.SaveModelDir);
@@ -85,21 +87,26 @@ internal sealed class SimpleRecTrainer
             TryLoadCheckpoint(model, ckpt);
         }
 
-        var acc = Evaluate(model, evalSet, cfg.EvalBatchSize, shape.H, shape.W, cfg.MaxTextLength, dev, vocab);
-        var summary = new EvaluationSummary(acc, evalSet.Count);
+        var metrics = Evaluate(model, evalSet, cfg.EvalBatchSize, shape.H, shape.W, cfg.MaxTextLength, dev, vocab);
+        var summary = new EvaluationSummary(metrics.Accuracy, evalSet.Count);
         Directory.CreateDirectory(cfg.SaveModelDir);
         File.WriteAllText(
             Path.Combine(cfg.SaveModelDir, "eval_result.json"),
-            JsonSerializer.Serialize(new { accuracy = acc, samples = evalSet.Count }, new JsonSerializerOptions { WriteIndented = true }));
-        _logger.LogInformation("rec eval_acc={EvalAcc:F4} samples={Samples}", summary.Accuracy, summary.Samples);
+            JsonSerializer.Serialize(metrics, new JsonSerializerOptions { WriteIndented = true }));
+        _logger.LogInformation(
+            "rec eval_acc={EvalAcc:F4} char_acc={CharAcc:F4} avg_edit={Edit:F4} samples={Samples}",
+            metrics.Accuracy, metrics.CharacterAccuracy, metrics.AvgEditDistance, summary.Samples);
         return summary;
     }
 
-    private static float Evaluate(SimpleRecNet model, SimpleRecDataset evalSet, int batchSize, int h, int w, int maxTextLength, Device dev, IReadOnlyList<char> vocab)
+    private static RecEvalMetrics Evaluate(SimpleRecNet model, SimpleRecDataset evalSet, int batchSize, int h, int w, int maxTextLength, Device dev, IReadOnlyList<char> vocab)
     {
         model.eval();
         long correct = 0;
-        var total = 0;
+        var total = 0L;
+        var charTotal = 0L;
+        var charErrors = 0L;
+        var editSum = 0L;
         using var noGrad = torch.no_grad();
         foreach (var (images, labels, batch) in evalSet.GetBatches(batchSize, shuffle: false, new Random(7)))
         {
@@ -121,11 +128,54 @@ internal sealed class SimpleRecTrainer
                 {
                     correct++;
                 }
+                var edit = Levenshtein(predText, gtText);
+                editSum += edit;
+                charErrors += edit;
+                charTotal += gtText.Length;
                 total++;
             }
         }
 
-        return total == 0 ? 0f : (float)correct / total;
+        var acc = total == 0 ? 0f : (float)correct / total;
+        var charAcc = charTotal == 0 ? 0f : 1f - (float)charErrors / charTotal;
+        var avgEdit = total == 0 ? 0f : (float)editSum / total;
+        return new RecEvalMetrics(acc, charAcc, avgEdit);
+    }
+
+    private static int Levenshtein(string left, string right)
+    {
+        if (left.Length == 0)
+        {
+            return right.Length;
+        }
+
+        if (right.Length == 0)
+        {
+            return left.Length;
+        }
+
+        var prev = new int[right.Length + 1];
+        var curr = new int[right.Length + 1];
+        for (var j = 0; j <= right.Length; j++)
+        {
+            prev[j] = j;
+        }
+
+        for (var i = 1; i <= left.Length; i++)
+        {
+            curr[0] = i;
+            for (var j = 1; j <= right.Length; j++)
+            {
+                var cost = left[i - 1] == right[j - 1] ? 0 : 1;
+                curr[j] = Math.Min(
+                    Math.Min(curr[j - 1] + 1, prev[j] + 1),
+                    prev[j - 1] + cost);
+            }
+
+            (prev, curr) = (curr, prev);
+        }
+
+        return prev[right.Length];
     }
 
     private void SaveCheckpoint(string saveDir, SimpleRecNet model, string fileName)
@@ -190,6 +240,8 @@ internal sealed class SimpleRecTrainer
         File.WriteAllText(Path.Combine(saveDir, "train_result.json"), json);
     }
 }
+
+internal sealed record RecEvalMetrics(float Accuracy, float CharacterAccuracy, float AvgEditDistance);
 
 internal sealed class SimpleRecNet : Module<Tensor, Tensor>
 {

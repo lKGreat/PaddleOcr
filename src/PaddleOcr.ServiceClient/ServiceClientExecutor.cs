@@ -45,6 +45,8 @@ public sealed class ServiceClientExecutor : ICommandExecutor
         var visualize = context.Options.TryGetValue("--visualize", out var v) &&
                         v.Equals("true", StringComparison.OrdinalIgnoreCase);
         var outputDir = context.Options.TryGetValue("--output", out var outDir) ? outDir : "./hubserving_result";
+        var parallel = ParseInt(context, "--parallel", 1, 1, 64);
+        var timeoutMs = ParseInt(context, "--timeout_ms", 15000, 100, 300000);
         if (visualize)
         {
             Directory.CreateDirectory(outputDir);
@@ -52,53 +54,72 @@ public sealed class ServiceClientExecutor : ICommandExecutor
 
         var totalMs = 0d;
         var okCount = 0;
-        foreach (var imageFile in imageFiles)
+        var options = new ParallelOptions
+        {
+            MaxDegreeOfParallelism = parallel,
+            CancellationToken = cancellationToken
+        };
+        var sync = new object();
+        await Parallel.ForEachAsync(imageFiles, options, async (imageFile, ct) =>
         {
             byte[] bytes;
             try
             {
-                bytes = await File.ReadAllBytesAsync(imageFile, cancellationToken);
+                bytes = await File.ReadAllBytesAsync(imageFile, ct);
             }
             catch (Exception ex)
             {
                 context.Logger.LogWarning(ex, "error in loading image: {Image}", imageFile);
-                continue;
+                return;
             }
 
+            using var reqCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            reqCts.CancelAfter(timeoutMs);
             var payload = new { images = new[] { Convert.ToBase64String(bytes) } };
             var sw = Stopwatch.StartNew();
             HttpResponseMessage resp;
             try
             {
-                resp = await Http.PostAsJsonAsync(serverUri, payload, cancellationToken);
+                resp = await Http.PostAsJsonAsync(serverUri, payload, reqCts.Token);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                context.Logger.LogWarning("request timeout ({TimeoutMs}ms): {Image}", timeoutMs, imageFile);
+                return;
             }
             catch (Exception ex)
             {
                 context.Logger.LogWarning(ex, "request failed: {Image}", imageFile);
-                continue;
+                return;
             }
             finally
             {
                 sw.Stop();
             }
 
-            totalMs += sw.Elapsed.TotalMilliseconds;
+            lock (sync)
+            {
+                totalMs += sw.Elapsed.TotalMilliseconds;
+            }
             if (!resp.IsSuccessStatusCode)
             {
                 context.Logger.LogWarning("server returned {Code} for {Image}", (int)resp.StatusCode, imageFile);
-                continue;
+                return;
             }
 
-            var json = await resp.Content.ReadAsStringAsync(cancellationToken);
+            var json = await resp.Content.ReadAsStringAsync(ct);
             context.Logger.LogInformation("Predict time of {Image}: {Ms:F1}ms", imageFile, sw.Elapsed.TotalMilliseconds);
-            okCount++;
+            lock (sync)
+            {
+                okCount++;
+            }
             if (!visualize)
             {
-                continue;
+                return;
             }
 
             TryVisualizeResult(imageFile, json, outputDir, context);
-        }
+        });
 
         if (okCount == 0)
         {
@@ -106,7 +127,7 @@ public sealed class ServiceClientExecutor : ICommandExecutor
         }
 
         var avgMs = totalMs / okCount;
-        return CommandResult.Ok($"service test completed: success={okCount}/{imageFiles.Count}, avg_time_ms={avgMs:F2}");
+        return CommandResult.Ok($"service test completed: success={okCount}/{imageFiles.Count}, avg_time_ms={avgMs:F2}, parallel={parallel}, timeout_ms={timeoutMs}");
     }
 
     private static IEnumerable<string> EnumerateImages(string path)
@@ -202,5 +223,15 @@ public sealed class ServiceClientExecutor : ICommandExecutor
         {
             context.Logger.LogWarning(ex, "failed to visualize server result for {Image}", imageFile);
         }
+    }
+
+    private static int ParseInt(PaddleOcr.Core.Cli.ExecutionContext context, string key, int fallback, int min, int max)
+    {
+        if (!context.Options.TryGetValue(key, out var text) || !int.TryParse(text, out var value))
+        {
+            return fallback;
+        }
+
+        return Math.Clamp(value, min, max);
     }
 }

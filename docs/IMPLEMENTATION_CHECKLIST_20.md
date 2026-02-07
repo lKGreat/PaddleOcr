@@ -21,11 +21,11 @@ Each item is considered complete only when all conditions are true:
 - [x] 6. Implement `infer kie` native execution.
 - [x] 7. Implement `infer kie-ser` native execution.
 - [x] 8. Implement `infer kie-re` native execution.
-- [ ] 9. Upgrade rec training metrics (char acc, edit distance).
-- [ ] 10. Unify export manifest schema across all model types.
+- [x] 9. Upgrade rec training metrics (char acc, edit distance).
+- [x] 10. Unify export manifest schema across all model types.
 - [ ] 11. Extend convert subcommand family with consistent validation.
-- [ ] 12. Add service test concurrency/timeout controls.
-- [ ] 13. Standardize infer output directory and naming conventions.
+- [x] 12. Add service test concurrency/timeout controls.
+- [x] 13. Standardize infer output directory and naming conventions.
 - [ ] 14. Add pre/post-processing component registry architecture.
 - [ ] 15. Complete config view types for `table/kie/sr`.
 - [ ] 16. Add tiny sample assets for `table/kie/sr`.

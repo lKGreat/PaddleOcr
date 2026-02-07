@@ -95,7 +95,7 @@ public sealed class InferenceExecutor : ICommandExecutor
             return CommandResult.Fail("infer system requires --image_dir and --rec_model_dir");
         }
 
-        var output = GetOrDefault(context, "--draw_img_save_dir", "./inference_results");
+        var output = ResolveOutputDir(context, "system");
         var useOnnx = bool.TryParse(GetOrDefault(context, "--use_onnx", "false"), out var flag) && flag;
 
         if (!useOnnx)
@@ -156,7 +156,7 @@ public sealed class InferenceExecutor : ICommandExecutor
             return CommandResult.Fail($"det model not found: {detModel}");
         }
 
-        var output = GetOrDefault(context, "--draw_img_save_dir", "./inference_results");
+        var output = ResolveOutputDir(context, "det");
         var options = new DetOnnxOptions(imageDir, detModel, output, ParseFloat(GetOrDefault(context, "--det_db_thresh", "0.3")));
         new DetOnnxRunner().Run(options);
         return CommandResult.Ok($"infer det completed. output={output}");
@@ -181,7 +181,7 @@ public sealed class InferenceExecutor : ICommandExecutor
             return CommandResult.Fail($"rec model not found: {recModel}");
         }
 
-        var output = GetOrDefault(context, "--draw_img_save_dir", "./inference_results");
+        var output = ResolveOutputDir(context, "rec");
         var options = new RecOnnxOptions(
             imageDir,
             recModel,
@@ -212,7 +212,7 @@ public sealed class InferenceExecutor : ICommandExecutor
             return CommandResult.Fail($"cls model not found: {clsModel}");
         }
 
-        var output = GetOrDefault(context, "--draw_img_save_dir", "./inference_results");
+        var output = ResolveOutputDir(context, "cls");
         var options = new ClsOnnxOptions(
             imageDir,
             clsModel,
@@ -248,7 +248,7 @@ public sealed class InferenceExecutor : ICommandExecutor
             return CommandResult.Fail($"rec model not found: {recModel}");
         }
 
-        var output = GetOrDefault(context, "--draw_img_save_dir", "./inference_results");
+        var output = ResolveOutputDir(context, "e2e");
         var options = new SystemOnnxOptions(
             imageDir,
             recModel,
@@ -284,7 +284,7 @@ public sealed class InferenceExecutor : ICommandExecutor
             return CommandResult.Fail($"sr model not found: {srModel}");
         }
 
-        var output = GetOrDefault(context, "--draw_img_save_dir", "./inference_results");
+        var output = ResolveOutputDir(context, "sr");
         var options = new SrOnnxOptions(imageDir, srModel, output);
         new SrOnnxRunner().Run(options);
         return CommandResult.Ok($"infer sr completed. output={output}");
@@ -309,7 +309,7 @@ public sealed class InferenceExecutor : ICommandExecutor
             return CommandResult.Fail($"table model not found: {tableModel}");
         }
 
-        var output = GetOrDefault(context, "--draw_img_save_dir", "./inference_results");
+        var output = ResolveOutputDir(context, "table");
         var options = new TableOnnxOptions(
             imageDir,
             tableModel,
@@ -343,7 +343,7 @@ public sealed class InferenceExecutor : ICommandExecutor
             return CommandResult.Fail($"{commandName} model not found: {modelPath}");
         }
 
-        var output = GetOrDefault(context, "--draw_img_save_dir", "./inference_results");
+        var output = ResolveOutputDir(context, commandName);
         var options = new KieOnnxOptions(
             taskName,
             imageDir,
@@ -367,6 +367,16 @@ public sealed class InferenceExecutor : ICommandExecutor
     private static string GetOrDefault(PaddleOcr.Core.Cli.ExecutionContext context, string key, string defaultValue)
     {
         return context.Options.TryGetValue(key, out var value) ? value : defaultValue;
+    }
+
+    private static string ResolveOutputDir(PaddleOcr.Core.Cli.ExecutionContext context, string command)
+    {
+        if (context.Options.TryGetValue("--draw_img_save_dir", out var value) && !string.IsNullOrWhiteSpace(value))
+        {
+            return value;
+        }
+
+        return Path.Combine("./inference_results", command.Replace('-', '_'));
     }
 
     private static bool ParseBool(string text)
