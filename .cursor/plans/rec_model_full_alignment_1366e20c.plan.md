@@ -259,7 +259,7 @@ public sealed record RecOnnxOptions(
 
 在 `src/PaddleOcr.Training/Heads/` 目录下:
 
-- `**CTCHead**`: Linear -> vocab_size, 可选2层FC
+- `**CTCHead`**: Linear -> vocab_size, 可选2层FC
 - `**AttentionHead**`: GRU/LSTM attention cell
 - `**SARHead**`: SAREncoder + ParallelSARDecoder (2D attention)
 - `**NRTRHead` (Transformer)**: Encoder-Decoder Transformer + 位置编码
@@ -321,7 +321,7 @@ public sealed record RecOnnxOptions(
 
 在 `src/PaddleOcr.Data/` 中:
 
-- `**RecAugmentation.cs**`: Rec 数据增强 (旋转、噪声、模糊等)
+- `**RecAugmentation.cs`**: Rec 数据增强 (旋转、噪声、模糊等)
 - `**MultiScaleDataSet.cs**`: 多尺度数据集
 - `**LabelEncoders/**`: CTCLabelEncode, SARLabelEncode, NRTRLabelEncode 等
 

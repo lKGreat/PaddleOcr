@@ -4,6 +4,7 @@ using static TorchSharp.torch.nn;
 using PaddleOcr.Training.Rec.Backbones;
 using PaddleOcr.Training.Rec.Necks;
 using PaddleOcr.Training.Rec.Heads;
+using PaddleOcr.Training.Rec.Transforms;
 
 namespace PaddleOcr.Training.Rec;
 
@@ -21,6 +22,15 @@ public static class RecModelBuilder
         return name.ToLowerInvariant() switch
         {
             "mobilenetv1enhance" or "mobilenetv1_enhance" => BuildMobileNetV1Enhance(inChannels),
+            "mobilenetv3" or "mobilenet_v3" => BuildMobileNetV3(inChannels, "small"),
+            "mobilenetv3_large" => BuildMobileNetV3(inChannels, "large"),
+            "mobilenetv3_small" => BuildMobileNetV3(inChannels, "small"),
+            "resnet_vd" or "resnetvd" or "resnet34_vd" => BuildResNetVd(inChannels, 34),
+            "resnet18_vd" => BuildResNetVd(inChannels, 18),
+            "resnet50_vd" => BuildResNetVd(inChannels, 50),
+            "resnet101_vd" => BuildResNetVd(inChannels, 101),
+            "resnet152_vd" => BuildResNetVd(inChannels, 152),
+            "resnet200_vd" => BuildResNetVd(inChannels, 200),
             "pphgnet_small" or "pphgnetsmall" => BuildPPHGNetSmall(inChannels),
             "resnet31" => BuildResNet31(inChannels),
             "resnet32" => BuildResNet32(inChannels),
@@ -172,6 +182,40 @@ public static class RecModelBuilder
     {
         var m = new MicroNet(inChannels);
         return (m, m.OutChannels);
+    }
+
+    private static (Module<Tensor, Tensor>, int) BuildMobileNetV3(int inChannels, string modelName)
+    {
+        var m = new MobileNetV3(inChannels, modelName);
+        return (m, m.OutChannels);
+    }
+
+    private static (Module<Tensor, Tensor>, int) BuildResNetVd(int inChannels, int layers)
+    {
+        var m = new ResNetVd(inChannels, layers);
+        return (m, m.OutChannels);
+    }
+
+    /// <summary>
+    /// 构建可选的 Transform（如 STN_ON），在 Backbone 之前。
+    /// </summary>
+    public static Module<Tensor, Tensor>? BuildTransform(string? name, int inChannels)
+    {
+        if (string.IsNullOrEmpty(name))
+        {
+            return null;
+        }
+
+        return name.ToLowerInvariant() switch
+        {
+            "stn_on" or "stn" => new STN_ON(inChannels,
+                tpsInputSize: [32, 64],
+                tpsOutputSize: [32, 100],
+                numControlPoints: 20,
+                tpsMargins: [0.05f, 0.05f],
+                stnActivation: "none"),
+            _ => null
+        };
     }
 }
 

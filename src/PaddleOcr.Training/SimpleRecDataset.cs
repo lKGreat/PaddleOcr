@@ -12,6 +12,7 @@ public sealed class SimpleRecDataset
     private readonly int _width;
     private readonly int _maxTextLength;
     private readonly IReadOnlyDictionary<char, int> _charToId;
+    private readonly bool _enableAugmentation;
 
     public SimpleRecDataset(
         string labelFile,
@@ -19,12 +20,14 @@ public sealed class SimpleRecDataset
         int height,
         int width,
         int maxTextLength,
-        IReadOnlyDictionary<char, int> charToId)
+        IReadOnlyDictionary<char, int> charToId,
+        bool enableAugmentation = false)
     {
         _height = height;
         _width = width;
         _maxTextLength = maxTextLength;
         _charToId = charToId;
+        _enableAugmentation = enableAugmentation;
         _samples = LoadSamples(labelFile, dataDir);
     }
 
@@ -137,8 +140,16 @@ public sealed class SimpleRecDataset
     private float[] LoadImageChw(string imagePath)
     {
         using var img = Image.Load<Rgb24>(imagePath);
+
+        // 数据增强（仅训练时启用）
+        if (_enableAugmentation)
+        {
+            PaddleOcr.Data.RecAugmentation.ApplyAugmentation(img);
+        }
+
         img.Mutate(x => x.Resize(_width, _height));
 
+        // 归一化到 [-1, 1]：(pixel/255 - 0.5) / 0.5 = pixel/127.5 - 1
         var data = new float[3 * _height * _width];
         var hw = _height * _width;
         for (var y = 0; y < _height; y++)
@@ -147,9 +158,9 @@ public sealed class SimpleRecDataset
             {
                 var p = img[x, y];
                 var idx = y * _width + x;
-                data[idx] = p.R / 255f;
-                data[hw + idx] = p.G / 255f;
-                data[2 * hw + idx] = p.B / 255f;
+                data[idx] = p.R / 127.5f - 1f;
+                data[hw + idx] = p.G / 127.5f - 1f;
+                data[2 * hw + idx] = p.B / 127.5f - 1f;
             }
         }
 

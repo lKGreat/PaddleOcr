@@ -84,33 +84,112 @@ public static class RecAugmentation
     }
 
     /// <summary>
-    /// 应用组合增强。
+    /// 随机 HSV 调整（色调/饱和度/亮度）。
+    /// 参考: ppocr/data/imaug/rec_img_aug.py - HSV augmentation
+    /// </summary>
+    public static Image<Rgb24> RandomHsv(Image<Rgb24> image, float hueRange = 0.1f, float satRange = 0.3f, float valRange = 0.3f)
+    {
+        var rng = Random.Shared;
+        var hShift = (rng.NextSingle() * 2 - 1) * hueRange;
+        var sScale = 1f + (rng.NextSingle() * 2 - 1) * satRange;
+        var vScale = 1f + (rng.NextSingle() * 2 - 1) * valRange;
+
+        image.Mutate(x => x.Saturate(sScale).Brightness(vScale).Hue(hShift * 360f));
+        return image;
+    }
+
+    /// <summary>
+    /// 图像反转（255 - pixel）。
+    /// 参考: ppocr/data/imaug/rec_img_aug.py - reverse
+    /// </summary>
+    public static Image<Rgb24> Reverse(Image<Rgb24> image)
+    {
+        image.Mutate(x => x.Invert());
+        return image;
+    }
+
+    /// <summary>
+    /// 随机裁剪（保持文字区域）。
+    /// </summary>
+    public static Image<Rgb24> RandomCrop(Image<Rgb24> image, float cropRatio = 0.1f)
+    {
+        var rng = Random.Shared;
+        var w = image.Width;
+        var h = image.Height;
+        var cropW = (int)(w * cropRatio * rng.NextSingle());
+        var cropH = (int)(h * cropRatio * rng.NextSingle());
+        if (cropW >= w / 2 || cropH >= h / 2)
+        {
+            return image;
+        }
+
+        var x1 = rng.Next(0, Math.Max(1, cropW));
+        var y1 = rng.Next(0, Math.Max(1, cropH));
+        var newW = w - cropW;
+        var newH = h - cropH;
+        if (newW <= 0 || newH <= 0)
+        {
+            return image;
+        }
+
+        image.Mutate(ctx => ctx.Crop(new Rectangle(x1, y1, newW, newH)));
+        return image;
+    }
+
+    /// <summary>
+    /// 应用组合增强（对应官方 RecAug / BaseDataAugmentation）。
+    /// 参考: ppocr/data/imaug/rec_img_aug.py
     /// </summary>
     public static Image<Rgb24> ApplyAugmentation(Image<Rgb24> image, bool enableRotate = true, bool enableNoise = true, bool enableBlur = true, bool enableBrightness = true, bool enableContrast = true)
     {
-        if (enableRotate && Random.Shared.NextSingle() > 0.5f)
+        var rng = Random.Shared;
+
+        // 随机裁剪
+        if (rng.NextSingle() > 0.5f)
+        {
+            image = RandomCrop(image);
+        }
+
+        // 旋转
+        if (enableRotate && rng.NextSingle() > 0.5f)
         {
             image = RandomRotate(image);
         }
 
-        if (enableNoise && Random.Shared.NextSingle() > 0.5f)
-        {
-            image = AddNoise(image);
-        }
-
-        if (enableBlur && Random.Shared.NextSingle() > 0.5f)
+        // 模糊
+        if (enableBlur && rng.NextSingle() > 0.5f)
         {
             image = RandomBlur(image);
         }
 
-        if (enableBrightness && Random.Shared.NextSingle() > 0.5f)
+        // HSV 增强
+        if (rng.NextSingle() > 0.5f)
+        {
+            image = RandomHsv(image);
+        }
+
+        // 噪声
+        if (enableNoise && rng.NextSingle() > 0.5f)
+        {
+            image = AddNoise(image);
+        }
+
+        // 亮度
+        if (enableBrightness && rng.NextSingle() > 0.5f)
         {
             image = RandomBrightness(image);
         }
 
-        if (enableContrast && Random.Shared.NextSingle() > 0.5f)
+        // 对比度
+        if (enableContrast && rng.NextSingle() > 0.5f)
         {
             image = RandomContrast(image);
+        }
+
+        // 随机反转
+        if (rng.NextSingle() > 0.9f)
+        {
+            image = Reverse(image);
         }
 
         return image;
