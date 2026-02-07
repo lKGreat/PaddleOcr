@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using PaddleOcr.Core.Cli;
 using PaddleOcr.Inference.Onnx;
+using PaddleOcr.Models;
 
 namespace PaddleOcr.Inference;
 
@@ -331,16 +332,30 @@ public sealed class InferenceExecutor : ICommandExecutor
             return CommandResult.Fail($"rec model not found: {recModel}");
         }
 
+        var recAlgorithm = RecAlgorithmExtensions.Parse(
+            ResolveString(context, "--rec_algorithm", "Global.rec_algorithm", "Architecture.algorithm") ?? "SVTR_LCNet");
+        var recImageShape = ResolveString(context, "--rec_image_shape", "Global.rec_image_shape") ?? "3,48,320";
+        var recBatchNum = ParseInt(ResolveString(context, "--rec_batch_num", "Global.rec_batch_num") ?? "6", 6, 1);
+        var maxTextLength = ParseInt(ResolveString(context, "--max_text_length", "Global.max_text_length") ?? "25", 25, 1);
+        var recImageInverse = ParseBool(ResolveString(context, "--rec_image_inverse", "Global.rec_image_inverse") ?? "false");
+        var returnWordBox = ParseBool(ResolveString(context, "--return_word_box", "Global.return_word_box") ?? "false");
+
         var output = ResolveOutputDir(context, "rec");
         var options = new RecOnnxOptions(
             imageDir,
             recModel,
             output,
-            GetOrNull(context, "--rec_char_dict_path"),
+            ResolveString(context, "--rec_char_dict_path", "Global.rec_char_dict_path", "Global.character_dict_path"),
             ParseBool(GetOrDefault(context, "--use_space_char", "true")),
-            ParseFloat(GetOrDefault(context, "--drop_score", "0.5")));
+            ParseFloat(GetOrDefault(context, "--drop_score", "0.5")),
+            recAlgorithm,
+            recImageShape,
+            recBatchNum,
+            maxTextLength,
+            recImageInverse,
+            returnWordBox);
         new RecOnnxRunner().Run(options);
-        return CommandResult.Ok($"infer rec completed. output={output}");
+        return CommandResult.Ok($"infer rec completed. algorithm={recAlgorithm}, output={output}");
     }
 
     private static CommandResult RunCls(PaddleOcr.Core.Cli.ExecutionContext context)

@@ -10,13 +10,13 @@ todos:
     status: completed
   - id: phase3-preprocessors
     content: "Phase 3: 推理预处理策略 - 实现 8 个算法特定预处理器 (Default/NRTR/SAR/SRN/CAN/LaTeXOCR/SPIN/VisionLAN)"
-    status: in_progress
+    status: completed
   - id: phase4-infer-integration
     content: "Phase 4: 推理集成 - 扩展 RecOnnxOptions/RecOnnxRunner/CLI，支持算法选择、批处理、动态图像尺寸"
-    status: pending
+    status: completed
   - id: phase5-backbones-necks-heads
     content: "Phase 5: TorchSharp 网络组件 - Backbones(15+)/Necks(5)/Heads(18+)/RecModelBuilder"
-    status: pending
+    status: in_progress
   - id: phase6-losses
     content: "Phase 6: 损失函数 - CTCLoss/AttentionLoss/SARLoss/NRTRLoss/MultiLoss 等 15+ 损失函数 + RecLossBuilder"
     status: pending
@@ -176,9 +176,9 @@ public interface IRecPreprocessor
 - `**SarRecPreprocessor`**: 保持宽高比 + valid_ratio 计算 (SAR, RobustScanner)
 - `**SrnRecPreprocessor`**: 编码 word_pos, gsrm_word_pos, attention 偏置 (SRN)
 - `**CanRecPreprocessor`**: 特殊归一化 + image_mask (CAN)
-- `**LaTeXOcrPreprocessor**`: 特殊归一化 + 动态尺寸 (LaTeXOCR)
-- `**SpinRecPreprocessor**`: SPIN 特定归一化
-- `**VisionLanPreprocessor**`: VisionLAN 特定处理
+- `**LaTeXOcrPreprocessor`**: 特殊归一化 + 动态尺寸 (LaTeXOCR)
+- `**SpinRecPreprocessor`**: SPIN 特定归一化
+- `**VisionLanPreprocessor`**: VisionLAN 特定处理
 
 工厂类 `RecPreprocessorFactory` 根据 `RecAlgorithm` 返回对应预处理器。
 
@@ -239,9 +239,9 @@ public sealed record RecOnnxOptions(
 - `**SVTRNet`**: Local/Global 混合注意力 + ConvMixer
 - `**ResNet31/32/45`**: 用于 SAR/SATRN/NRTR
 - `**ViTSTR`**: Vision Transformer backbone
-- `**MTB**`: NRTR 的 Multi-Task Backbone
-- `**DenseNet**`: 用于 VisionLAN
-- `**EfficientNetB3**`: 用于 PREN
+- `**MTB`**: NRTR 的 Multi-Task Backbone
+- `**DenseNet`**: 用于 VisionLAN
+- `**EfficientNetB3`**: 用于 PREN
 - 其余: `PPHGNetV2`, `SVTRv2`, `RepSVTR`, `ShallowCNN`, `PPLCNetV3`, `MicroNet` 等
 
 ### 5.2 Neck 实现
@@ -288,9 +288,9 @@ public sealed record RecOnnxOptions(
 - `**SARLoss`**: CrossEntropy + ignore_index
 - `**NRTRLoss`**: CrossEntropy + label smoothing + padding mask
 - `**SRNLoss`**: SRN 专用损失
-- `**MultiLoss**`: 加权组合 CTC + SAR/NRTR
+- `**MultiLoss`**: 加权组合 CTC + SAR/NRTR
 - 其余: `AsterLoss`, `PRENLoss`, `VLLoss`, `SPINAttentionLoss`, `RFLLoss`, `CANLoss`, `SATRNLoss`, `ParseQLoss`, `CPPDLoss`, `LaTeXOCRLoss`, `UniMERNetLoss`, `PPFormulaNetLoss`, `EnhancedCTCLoss`
-- `**RecLossBuilder**`: 工厂类，从 config 构建损失
+- `**RecLossBuilder`**: 工厂类，从 config 构建损失
 
 ---
 
@@ -312,9 +312,9 @@ public sealed record RecOnnxOptions(
 
 在 `src/PaddleOcr.Training/` 中:
 
-- `**AmpTrainingHelper.cs**`: 混合精度训练 (TorchSharp AMP)
-- `**ModelAverager.cs**`: 模型参数平均 (SRN)
-- `**DistillationTrainer.cs**`: 蒸馏训练支持
+- `**AmpTrainingHelper.cs`**: 混合精度训练 (TorchSharp AMP)
+- `**ModelAverager.cs`**: 模型参数平均 (SRN)
+- `**DistillationTrainer.cs`**: 蒸馏训练支持
 - `**GradientUtils.cs**`: 梯度裁剪、梯度累积
 
 ### 7.3 数据增强和数据集

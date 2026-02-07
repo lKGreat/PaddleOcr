@@ -313,24 +313,65 @@ public sealed class RecOnnxRunner
 
         Directory.CreateDirectory(options.OutputDir);
         var charset = CharsetLoader.Load(options.RecCharDictPath, options.UseSpaceChar);
-        var recPost = InferenceComponentRegistry.GetRecPostprocessor();
+        var recPost = InferenceComponentRegistry.GetRecPostprocessor(options.RecAlgorithm);
+        var preprocessor = Rec.Preprocessors.RecPreprocessorFactory.Create(options.RecAlgorithm, options.RecImageInverse);
         using var rec = new InferenceSession(options.RecModelPath);
 
+        // 解析图像形状
+        var (targetC, targetH, targetW) = ParseImageShape(options.RecImageShape, options.RecAlgorithm);
+        var batchSize = Math.Max(1, options.RecBatchNum);
+
         var lines = new List<string>(imageFiles.Count);
-        foreach (var file in imageFiles)
+
+        // 按 batch 分批处理
+        for (var batchStart = 0; batchStart < imageFiles.Count; batchStart += batchSize)
         {
-            using var img = Image.Load<Rgb24>(file);
-            var output = OnnxRuntimeUtils.RunSession(rec, img, 48, 320).FirstOrDefault();
-            var recRes = output is null
-                ? new RecResult(string.Empty, 0f)
-                : recPost(output.Data, output.Dims, charset);
-            var payload = recRes.Score >= options.DropScore
-                ? new[] { new { text = recRes.Text, score = recRes.Score } }
-                : Array.Empty<object>();
-            lines.Add($"{Path.GetFileName(file)}\t{JsonSerializer.Serialize(payload)}");
+            var batchEnd = Math.Min(batchStart + batchSize, imageFiles.Count);
+            for (var i = batchStart; i < batchEnd; i++)
+            {
+                var file = imageFiles[i];
+                using var img = Image.Load<Rgb24>(file);
+
+                // 使用算法特定的预处理器
+                var preResult = preprocessor.Process(img, targetC, targetH, targetW);
+
+                // 运行 ONNX 推理
+                var tensor = new Microsoft.ML.OnnxRuntime.Tensors.DenseTensor<float>(
+                    preResult.Data,
+                    preResult.Dims);
+                var inputName = rec.InputMetadata.First().Key;
+                var inputs = new List<NamedOnnxValue>
+                {
+                    NamedOnnxValue.CreateFromTensor(inputName, tensor)
+                };
+                using var outputs = rec.Run(inputs);
+                var outTensor = outputs.First().AsTensor<float>();
+                var outData = outTensor.ToArray();
+                var outDims = outTensor.Dimensions.ToArray();
+
+                var recRes = recPost(outData, outDims, charset);
+                var payload = recRes.Score >= options.DropScore
+                    ? new[] { new { text = recRes.Text, score = recRes.Score } }
+                    : Array.Empty<object>();
+                lines.Add($"{Path.GetFileName(file)}\t{JsonSerializer.Serialize(payload)}");
+            }
         }
 
         File.WriteAllLines(Path.Combine(options.OutputDir, "rec_results.txt"), lines);
+    }
+
+    private static (int C, int H, int W) ParseImageShape(string shape, RecAlgorithm algorithm)
+    {
+        var parts = shape.Split(',', StringSplitOptions.TrimEntries);
+        if (parts.Length == 3 &&
+            int.TryParse(parts[0], out var c) &&
+            int.TryParse(parts[1], out var h) &&
+            int.TryParse(parts[2], out var w))
+        {
+            return (c, h, w);
+        }
+
+        return algorithm.GetDefaultImageShape();
     }
 }
 
@@ -709,7 +750,13 @@ public sealed record RecOnnxOptions(
     string OutputDir,
     string? RecCharDictPath,
     bool UseSpaceChar,
-    float DropScore);
+    float DropScore,
+    RecAlgorithm RecAlgorithm = RecAlgorithm.SVTR_LCNet,
+    string RecImageShape = "3,48,320",
+    int RecBatchNum = 6,
+    int MaxTextLength = 25,
+    bool RecImageInverse = false,
+    bool ReturnWordBox = false);
 
 public sealed record ClsOnnxOptions(
     string ImageDir,

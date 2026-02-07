@@ -5,6 +5,7 @@ namespace PaddleOcr.Training.Rec;
 
 /// <summary>
 /// Rec Backbone 组件接口。
+/// 实现类通常继承 Module&lt;Tensor, Tensor&gt;，forward 方法提供前向传播。
 /// </summary>
 public interface IRecBackbone
 {
@@ -12,15 +13,11 @@ public interface IRecBackbone
     /// 输出通道数，供下游 Neck/Head 使用。
     /// </summary>
     int OutChannels { get; }
-
-    /// <summary>
-    /// 前向传播。
-    /// </summary>
-    Tensor Forward(Tensor input);
 }
 
 /// <summary>
 /// Rec Neck 组件接口。
+/// 实现类通常继承 Module&lt;Tensor, Tensor&gt;，forward 方法提供前向传播。
 /// </summary>
 public interface IRecNeck
 {
@@ -28,20 +25,16 @@ public interface IRecNeck
     /// 输出通道数，供下游 Head 使用。
     /// </summary>
     int OutChannels { get; }
-
-    /// <summary>
-    /// 前向传播。
-    /// </summary>
-    Tensor Forward(Tensor input);
 }
 
 /// <summary>
 /// Rec Head 组件接口。
+/// 实现类通常继承 Module&lt;Tensor, Tensor&gt;，同时提供 ForwardDict 方法返回预测字典。
 /// </summary>
 public interface IRecHead
 {
     /// <summary>
-    /// 前向传播。
+    /// 前向传播，返回预测字典。
     /// </summary>
     /// <param name="input">来自 Neck 或 Backbone 的特征</param>
     /// <param name="targets">训练时的 label 信息（推理时为 null）</param>
