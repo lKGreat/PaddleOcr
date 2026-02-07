@@ -24,6 +24,8 @@
     <ProjectReference Include="..\..\src\PaddleOcr.Config\PaddleOcr.Config.csproj" />
     <ProjectReference Include="..\..\src\PaddleOcr.Tools\PaddleOcr.Tools.csproj" />
     <ProjectReference Include="..\..\src\PaddleOcr.Inference\PaddleOcr.Inference.csproj" />
+    <ProjectReference Include="..\..\src\PaddleOcr.Benchmark\PaddleOcr.Benchmark.csproj" />
+    <ProjectReference Include="..\..\src\PaddleOcr.Plugins\PaddleOcr.Plugins.csproj" />
   </ItemGroup>
 
 </Project>

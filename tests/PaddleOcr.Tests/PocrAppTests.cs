@@ -17,6 +17,8 @@ public sealed class PocrAppTests
         var export = new ProbeExecutor("export");
         var service = new ProbeExecutor("service");
         var e2e = new ProbeExecutor("e2e");
+        var benchmark = new ProbeExecutor("benchmark");
+        var plugin = new ProbeExecutor("plugin");
 
         var app = new PocrApp(
             NullLogger.Instance,
@@ -25,7 +27,9 @@ public sealed class PocrAppTests
             infer,
             export,
             service,
-            e2e);
+            e2e,
+            benchmark,
+            plugin);
 
         var code = await app.RunAsync(["infer", "system", "--image_dir", "./imgs"]);
 
@@ -54,7 +58,9 @@ public sealed class PocrAppTests
             new InferenceExecutor(),
             new ProbeExecutor("export"),
             new ProbeExecutor("service"),
-            new ProbeExecutor("e2e"));
+            new ProbeExecutor("e2e"),
+            new ProbeExecutor("benchmark"),
+            new ProbeExecutor("plugin"));
 
         var code = await app.RunAsync(["infer", "system", "--image_dir", "./imgs", "--use_onnx", "true"]);
         code.Should().Be(2);
@@ -71,7 +77,9 @@ public sealed class PocrAppTests
             new ProbeExecutor("inference"),
             export,
             new ProbeExecutor("service"),
-            new ProbeExecutor("e2e"));
+            new ProbeExecutor("e2e"),
+            new ProbeExecutor("benchmark"),
+            new ProbeExecutor("plugin"));
 
         var code = await app.RunAsync(["convert", "check-json-model", "--json_model_dir", "./m"]);
 
@@ -94,7 +102,9 @@ public sealed class PocrAppTests
             new ProbeExecutor("inference"),
             new ProbeExecutor("export"),
             new ProbeExecutor("service"),
-            new ProbeExecutor("e2e"));
+            new ProbeExecutor("e2e"),
+            new ProbeExecutor("benchmark"),
+            new ProbeExecutor("plugin"));
 
         var code = await app.RunAsync(["config", "check", "-c", cfg]);
         code.Should().Be(0);
@@ -117,7 +127,9 @@ public sealed class PocrAppTests
             new ProbeExecutor("inference"),
             new ProbeExecutor("export"),
             new ProbeExecutor("service"),
-            new ProbeExecutor("e2e"));
+            new ProbeExecutor("e2e"),
+            new ProbeExecutor("benchmark"),
+            new ProbeExecutor("plugin"));
 
         var code = await app.RunAsync(["config", "diff", "--base", a, "--target", b]);
         code.Should().Be(0);
@@ -133,9 +145,53 @@ public sealed class PocrAppTests
             new ProbeExecutor("inference"),
             new ProbeExecutor("export"),
             new ProbeExecutor("service"),
-            new ProbeExecutor("e2e"));
+            new ProbeExecutor("e2e"),
+            new ProbeExecutor("benchmark"),
+            new ProbeExecutor("plugin"));
 
         var code = await app.RunAsync(["doctor", "check-models", "--det_model_dir", "not_exists.onnx"]);
         code.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task RunAsync_Should_Route_Benchmark_Run_To_Benchmark_Executor()
+    {
+        var benchmark = new ProbeExecutor("benchmark");
+        var app = new PocrApp(
+            NullLogger.Instance,
+            new ConfigLoader(),
+            new ProbeExecutor("training"),
+            new ProbeExecutor("inference"),
+            new ProbeExecutor("export"),
+            new ProbeExecutor("service"),
+            new ProbeExecutor("e2e"),
+            benchmark,
+            new ProbeExecutor("plugin"));
+
+        var code = await app.RunAsync(["benchmark", "run", "--scenario", "infer:system"]);
+
+        code.Should().Be(0);
+        benchmark.Calls.Should().ContainSingle(c => c == "run");
+    }
+
+    [Fact]
+    public async Task RunAsync_Should_Route_Plugin_ValidatePackage_To_Plugin_Executor()
+    {
+        var plugin = new ProbeExecutor("plugin");
+        var app = new PocrApp(
+            NullLogger.Instance,
+            new ConfigLoader(),
+            new ProbeExecutor("training"),
+            new ProbeExecutor("inference"),
+            new ProbeExecutor("export"),
+            new ProbeExecutor("service"),
+            new ProbeExecutor("e2e"),
+            new ProbeExecutor("benchmark"),
+            plugin);
+
+        var code = await app.RunAsync(["plugin", "validate-package", "--package_dir", "."]);
+
+        code.Should().Be(0);
+        plugin.Calls.Should().ContainSingle(c => c == "validate-package");
     }
 }

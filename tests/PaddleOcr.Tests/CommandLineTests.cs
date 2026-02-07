@@ -38,4 +38,23 @@ public sealed class CommandLineTests
         cmd.Sub.Should().Be("check-models");
         cmd.Options["--det_model_dir"].Should().Be("a.onnx");
     }
+
+    [Fact]
+    public void Parse_Should_Read_Benchmark_Subcommand()
+    {
+        var cmd = CommandLine.Parse(["benchmark", "run", "--scenario", "infer:system", "--iterations", "20"]);
+        cmd.Root.Should().Be("benchmark");
+        cmd.Sub.Should().Be("run");
+        cmd.Options["--scenario"].Should().Be("infer:system");
+        cmd.Options["--iterations"].Should().Be("20");
+    }
+
+    [Fact]
+    public void Parse_Should_Read_Plugin_Subcommand()
+    {
+        var cmd = CommandLine.Parse(["plugin", "validate-package", "--package_dir", "./plugins/demo"]);
+        cmd.Root.Should().Be("plugin");
+        cmd.Sub.Should().Be("validate-package");
+        cmd.Options["--package_dir"].Should().Be("./plugins/demo");
+    }
 }

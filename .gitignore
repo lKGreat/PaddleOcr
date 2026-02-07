@@ -27,6 +27,9 @@ outputs/
 inference/
 inference_results/
 hubserving_result/
+benchmark_results/
+plugin_packages/
+plugins/local/
 debug/
 tmp/
 temp/

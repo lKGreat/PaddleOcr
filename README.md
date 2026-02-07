@@ -24,11 +24,14 @@ This repository is a C#/.NET 10 native implementation workspace for PaddleOCR to
 - `pocr export-center -c <config> -o K=V ...`
 - `pocr infer <det|rec|cls|e2e|kie|kie-ser|kie-re|table|sr|system> ...`
 - `pocr convert json2pdmodel ...`
+- `pocr config <check|diff> ...`
+- `pocr doctor check-models ...`
 - `pocr service test --server_url ... --image_dir ...`
 - `pocr e2e <convert-label|eval> ...`
+- `pocr benchmark run --scenario ... --iterations ...`
+- `pocr plugin validate-package --package_dir ...`
 
 ## Notes
 
 - Full OCR post-processing and training kernel implementation is still in progress.
 - Current `infer system` ONNX path executes sessions and records output tensor shapes as integration baseline.
-

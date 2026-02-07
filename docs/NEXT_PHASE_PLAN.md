@@ -14,3 +14,8 @@ Last updated: 2026-02-07
 - Every command change requires at least one contract test and one regression assertion.
 - Manifest and report schemas must remain backward-compatible (`1.x`).
 
+## Progress Snapshot
+- done: Added native `benchmark run` command with warmup/iterations/p95 throughput report (`benchmark_results/*.json`).
+- done: Added plugin package convention validator via `plugin validate-package --package_dir <dir>` with `plugin.json` schema checks.
+- done: Added CLI routing/help/tests for `benchmark` and `plugin` commands.
+- done: Expanded regression tests to cover benchmark executor and plugin package validator.

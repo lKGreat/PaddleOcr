@@ -14,6 +14,8 @@ public sealed class PocrApp
     private readonly ICommandExecutor _export;
     private readonly ICommandExecutor _service;
     private readonly ICommandExecutor _e2e;
+    private readonly ICommandExecutor _benchmark;
+    private readonly ICommandExecutor _plugin;
 
     public PocrApp(
         ILogger logger,
@@ -22,7 +24,9 @@ public sealed class PocrApp
         ICommandExecutor inference,
         ICommandExecutor export,
         ICommandExecutor service,
-        ICommandExecutor e2e)
+        ICommandExecutor e2e,
+        ICommandExecutor benchmark,
+        ICommandExecutor plugin)
     {
         _logger = logger;
         _configLoader = configLoader;
@@ -31,6 +35,8 @@ public sealed class PocrApp
         _export = export;
         _service = service;
         _e2e = e2e;
+        _benchmark = benchmark;
+        _plugin = plugin;
     }
 
     public async Task<int> RunAsync(string[] args, CancellationToken cancellationToken = default)
@@ -51,6 +57,8 @@ public sealed class PocrApp
             "doctor" => await RunDoctorAsync(parsed, context),
             "service" => await _service.ExecuteAsync(parsed.Sub ?? string.Empty, context, cancellationToken),
             "e2e" => await _e2e.ExecuteAsync(parsed.Sub ?? string.Empty, context, cancellationToken),
+            "benchmark" => await _benchmark.ExecuteAsync(parsed.Sub ?? string.Empty, context, cancellationToken),
+            "plugin" => await _plugin.ExecuteAsync(parsed.Sub ?? string.Empty, context, cancellationToken),
             _ => CommandResult.Fail($"Unknown command: {parsed.Root}\n{CommandLine.GetHelp()}")
         };
 

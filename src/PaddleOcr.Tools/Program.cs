@@ -5,6 +5,8 @@ using PaddleOcr.Core.Errors;
 using PaddleOcr.Data;
 using PaddleOcr.Export;
 using PaddleOcr.Inference;
+using PaddleOcr.Benchmark;
+using PaddleOcr.Plugins;
 using PaddleOcr.ServiceClient;
 using PaddleOcr.Tools;
 using PaddleOcr.Training;
@@ -30,7 +32,14 @@ try
         new InferenceExecutor(),
         new ExportExecutor(),
         new ServiceClientExecutor(),
-        new E2eToolsExecutor());
+        new E2eToolsExecutor(),
+        new BenchmarkExecutor(
+            new TrainingExecutor(),
+            new InferenceExecutor(),
+            new ExportExecutor(),
+            new ServiceClientExecutor(),
+            new E2eToolsExecutor()),
+        new PluginExecutor());
 
     var code = await app.RunAsync(args);
     Environment.ExitCode = code;

@@ -7,6 +7,8 @@
     <ProjectReference Include="..\PaddleOcr.Training\PaddleOcr.Training.csproj" />
     <ProjectReference Include="..\PaddleOcr.Export\PaddleOcr.Export.csproj" />
     <ProjectReference Include="..\PaddleOcr.ServiceClient\PaddleOcr.ServiceClient.csproj" />
+    <ProjectReference Include="..\PaddleOcr.Benchmark\PaddleOcr.Benchmark.csproj" />
+    <ProjectReference Include="..\PaddleOcr.Plugins\PaddleOcr.Plugins.csproj" />
   </ItemGroup>
 
   <ItemGroup>

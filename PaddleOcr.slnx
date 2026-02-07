@@ -1,11 +1,13 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/PaddleOcr.Benchmark/PaddleOcr.Benchmark.csproj" />
     <Project Path="src/PaddleOcr.Config/PaddleOcr.Config.csproj" />
     <Project Path="src/PaddleOcr.Core/PaddleOcr.Core.csproj" />
     <Project Path="src/PaddleOcr.Data/PaddleOcr.Data.csproj" />
     <Project Path="src/PaddleOcr.Export/PaddleOcr.Export.csproj" />
     <Project Path="src/PaddleOcr.Inference/PaddleOcr.Inference.csproj" />
     <Project Path="src/PaddleOcr.Models/PaddleOcr.Models.csproj" />
+    <Project Path="src/PaddleOcr.Plugins/PaddleOcr.Plugins.csproj" />
     <Project Path="src/PaddleOcr.ServiceClient/PaddleOcr.ServiceClient.csproj" />
     <Project Path="src/PaddleOcr.Tools/PaddleOcr.Tools.csproj" />
     <Project Path="src/PaddleOcr.Training/PaddleOcr.Training.csproj" />
