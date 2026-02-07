@@ -54,13 +54,42 @@ public sealed class BenchmarkExecutorTests
         result.Success.Should().BeFalse();
     }
 
+    [Fact]
+    public async Task ExecuteAsync_Should_Apply_Service_Profile_When_Provided()
+    {
+        var probe = new ProbeExecutor();
+        var executor = new BenchmarkExecutor(probe, probe, probe, probe, probe);
+        var context = new PaddleOcr.Core.Cli.ExecutionContext(
+            NullLogger.Instance,
+            ["benchmark", "run"],
+            null,
+            new Dictionary<string, object?>(),
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["--scenario"] = "service:test",
+                ["--profile"] = "stress",
+                ["--warmup"] = "0",
+                ["--iterations"] = "1"
+            },
+            []);
+
+        var result = await executor.ExecuteAsync("run", context);
+
+        result.Success.Should().BeTrue();
+        probe.LastOptions.Should().ContainKey("--parallel").WhoseValue.Should().Be("8");
+        probe.LastOptions.Should().ContainKey("--stress_rounds").WhoseValue.Should().Be("5");
+    }
+
     private sealed class ProbeExecutor : ICommandExecutor
     {
         public int Calls { get; private set; }
+        public IReadOnlyDictionary<string, string> LastOptions { get; private set; } =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         public Task<CommandResult> ExecuteAsync(string subCommand, PaddleOcr.Core.Cli.ExecutionContext context, CancellationToken cancellationToken = default)
         {
             Calls++;
+            LastOptions = context.Options;
             return Task.FromResult(CommandResult.Ok(subCommand));
         }
     }

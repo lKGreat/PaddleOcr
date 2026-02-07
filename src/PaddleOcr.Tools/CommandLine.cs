@@ -105,7 +105,7 @@ public static class CommandLine
                  doctor check-models [-c <config>] [--det_model_dir <path>] [--rec_model_dir <path>] [--cls_model_dir <path>] [--table_model_dir <path>] [--sr_model_dir <path>] [--kie_model_dir <path>]
                  service test --server_url <url> --image_dir <dir> [--parallel N --timeout_ms MS --retries N --stress_rounds N --dump_failures true]
                  e2e <convert-label|eval> [args]
-                 benchmark run --scenario <infer:system|service:test|e2e:eval|export:export-onnx|train:train> [--warmup N --iterations N --continue_on_error true --report_json <path>] [scenario options...]
+                 benchmark run --scenario <infer:system|service:test|e2e:eval|export:export-onnx|train:train> [--profile smoke|balanced|stress] [--warmup N --iterations N --continue_on_error true --report_json <path>] [scenario options...]
                  plugin validate-package --package_dir <dir>
                """;
     }

@@ -22,3 +22,4 @@ Last updated: 2026-02-07
 - done: Added deterministic table output serialization regression test (`TableResultSerializerTests`).
 - done: Strengthened manifest compatibility validation (`ManifestSemVer` 1.x + required compatibility fields) and regression tests.
 - done: Added CI-fast KIE/table smoke assets and script (`scripts/smoke-ci-fast.ps1`).
+- done: Added benchmark profile presets for `service:test` (`smoke|balanced|stress`) with option override support.

@@ -15,7 +15,7 @@ Status: `done` / `in_progress` / `pending`
 9. done - Deterministic infer regression expansion for `table` outputs
 10. done - Deterministic export regression for compatibility manifest fields
 11. done - KIE/table smoke assets refresh for CI-fast path
-12. pending - Service benchmark scenario presets (`service:test` profiles)
+12. done - Service benchmark scenario presets (`service:test` profiles)
 13. pending - Training benchmark scenario (`train:train`) synthetic dataset fixture
 14. pending - Plugin runtime loading abstraction for preprocess/postprocess extension
 15. pending - Plugin lifecycle hooks and fault isolation policy

@@ -12,7 +12,8 @@ public sealed class BenchmarkExecutor : ICommandExecutor
         "--warmup",
         "--iterations",
         "--continue_on_error",
-        "--report_json"
+        "--report_json",
+        "--profile"
     };
 
     private readonly ICommandExecutor _training;
@@ -50,6 +51,7 @@ public sealed class BenchmarkExecutor : ICommandExecutor
         var warmup = ParseInt(context, "--warmup", 2, 0, 50);
         var iterations = ParseInt(context, "--iterations", 10, 1, 500);
         var continueOnError = ParseBool(context, "--continue_on_error");
+        var profile = context.Options.TryGetValue("--profile", out var p) ? p : null;
         var reportJson = context.Options.TryGetValue("--report_json", out var reportPath) && !string.IsNullOrWhiteSpace(reportPath)
             ? reportPath
             : Path.Combine("benchmark_results", $"{scenario.Replace(':', '_')}_{DateTime.UtcNow:yyyyMMddHHmmss}.json");
@@ -61,7 +63,7 @@ public sealed class BenchmarkExecutor : ICommandExecutor
         }
         var route = routed.Value;
 
-        var scenarioContext = BuildScenarioContext(context);
+        var scenarioContext = BuildScenarioContext(context, scenario, profile);
         var warmupFailures = 0;
         for (var i = 0; i < warmup; i++)
         {
@@ -147,11 +149,15 @@ public sealed class BenchmarkExecutor : ICommandExecutor
         };
     }
 
-    private static PaddleOcr.Core.Cli.ExecutionContext BuildScenarioContext(PaddleOcr.Core.Cli.ExecutionContext source)
+    private static PaddleOcr.Core.Cli.ExecutionContext BuildScenarioContext(
+        PaddleOcr.Core.Cli.ExecutionContext source,
+        string scenario,
+        string? profile)
     {
         var options = source.Options
             .Where(x => !InternalFlags.Contains(x.Key))
             .ToDictionary(x => x.Key, x => x.Value, StringComparer.OrdinalIgnoreCase);
+        ApplyScenarioProfile(options, scenario, profile);
         return new PaddleOcr.Core.Cli.ExecutionContext(
             source.Logger,
             source.RawArgs,
@@ -159,6 +165,48 @@ public sealed class BenchmarkExecutor : ICommandExecutor
             source.Config,
             options,
             source.OverrideOptions);
+    }
+
+    private static void ApplyScenarioProfile(Dictionary<string, string> options, string scenario, string? profile)
+    {
+        if (!scenario.Equals("service:test", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(profile))
+        {
+            return;
+        }
+
+        var preset = profile.ToLowerInvariant() switch
+        {
+            "smoke" => new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["--parallel"] = "1",
+                ["--timeout_ms"] = "8000",
+                ["--retries"] = "0",
+                ["--stress_rounds"] = "1"
+            },
+            "balanced" => new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["--parallel"] = "4",
+                ["--timeout_ms"] = "15000",
+                ["--retries"] = "1",
+                ["--stress_rounds"] = "2"
+            },
+            "stress" => new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["--parallel"] = "8",
+                ["--timeout_ms"] = "20000",
+                ["--retries"] = "2",
+                ["--stress_rounds"] = "5"
+            },
+            _ => []
+        };
+
+        foreach (var pair in preset)
+        {
+            if (!options.ContainsKey(pair.Key))
+            {
+                options[pair.Key] = pair.Value;
+            }
+        }
     }
 
     private static int ParseInt(PaddleOcr.Core.Cli.ExecutionContext context, string key, int fallback, int min, int max)
