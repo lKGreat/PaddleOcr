@@ -35,3 +35,5 @@ This repository is a C#/.NET 10 native implementation workspace for PaddleOCR to
 
 - Full OCR post-processing and training kernel implementation is still in progress.
 - Current `infer system` ONNX path executes sessions and records output tensor shapes as integration baseline.
+- CI-fast smoke script:
+  - `scripts/smoke-ci-fast.ps1` (runs config/doctor checks for local `table`/`kie` tiny configs)

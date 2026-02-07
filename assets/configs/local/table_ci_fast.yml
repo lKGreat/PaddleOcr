@@ -1,0 +1,9 @@
+Global:
+  image_dir: assets/samples/tiny_cls/images
+  table_model_dir: assets/samples/models/table_tiny.modelstub
+  det_model_dir: assets/samples/models/det_tiny.modelstub
+  rec_model_dir: assets/samples/models/rec_tiny.modelstub
+  rec_char_dict_path: assets/samples/tiny_rec/dict.txt
+
+Architecture:
+  model_type: table

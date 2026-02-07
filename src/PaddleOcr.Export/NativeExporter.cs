@@ -144,6 +144,20 @@ public sealed class NativeExporter
                 return false;
             }
 
+            if (manifest.Compatibility is null ||
+                string.IsNullOrWhiteSpace(manifest.Compatibility.ManifestSemVer) ||
+                string.IsNullOrWhiteSpace(manifest.Compatibility.Runtime))
+            {
+                message = "manifest missing compatibility fields";
+                return false;
+            }
+
+            if (!manifest.Compatibility.ManifestSemVer.StartsWith("1.", StringComparison.Ordinal))
+            {
+                message = $"unsupported manifest compatibility: {manifest.Compatibility.ManifestSemVer}";
+                return false;
+            }
+
             message = manifestPath;
             return true;
         }

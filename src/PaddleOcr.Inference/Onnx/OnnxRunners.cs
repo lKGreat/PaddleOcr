@@ -284,12 +284,7 @@ public sealed class TableOnnxRunner
             using var image = Image.Load<Rgb24>(file);
             var tableOutputs = OnnxRuntimeUtils.RunSession(table, image, image.Height, image.Width);
             var ocr = OcrPipelineHelper.ExtractOcrItems(image, file, det, rec, charset, options.DropScore, options.DetThresh);
-            var payload = new
-            {
-                table_tensors = tableOutputs.Select((x, i) => new { index = i, dims = x.Dims, size = x.Data.Length }).ToList(),
-                ocr = ocr.Select(x => new { text = x.Transcription, score = x.Score, points = x.Points }).ToList()
-            };
-            lines.Add($"{Path.GetFileName(file)}\t{JsonSerializer.Serialize(payload)}");
+            lines.Add(TableResultSerializer.BuildLine(file, tableOutputs, ocr));
             if (ocr.Count > 0)
             {
                 OnnxRuntimeUtils.SaveVisualization(
@@ -389,6 +384,24 @@ internal static class OcrPipelineHelper
         var detPost = InferenceComponentRegistry.GetDetPostprocessor();
         var boxes = detPost(detOut.Data, detOut.Dims, width, height, thresh);
         return boxes.Count == 0 ? [PostprocessUtils.FullImageBox(width, height)] : boxes;
+    }
+}
+
+public static class TableResultSerializer
+{
+    public static string BuildLine(string imageFile, IReadOnlyList<TensorOutput> tableOutputs, IReadOnlyList<OcrItem> ocr)
+    {
+        var payload = BuildPayload(tableOutputs, ocr);
+        return $"{Path.GetFileName(imageFile)}\t{JsonSerializer.Serialize(payload)}";
+    }
+
+    public static object BuildPayload(IReadOnlyList<TensorOutput> tableOutputs, IReadOnlyList<OcrItem> ocr)
+    {
+        return new
+        {
+            table_tensors = tableOutputs.Select((x, i) => new { index = i, dims = x.Dims, size = x.Data.Length }).ToList(),
+            ocr = ocr.Select(x => new { text = x.Transcription, score = x.Score, points = x.Points }).ToList()
+        };
     }
 }
 

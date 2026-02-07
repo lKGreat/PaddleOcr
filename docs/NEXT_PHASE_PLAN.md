@@ -19,3 +19,6 @@ Last updated: 2026-02-07
 - done: Added plugin package convention validator via `plugin validate-package --package_dir <dir>` with `plugin.json` schema checks.
 - done: Added CLI routing/help/tests for `benchmark` and `plugin` commands.
 - done: Expanded regression tests to cover benchmark executor and plugin package validator.
+- done: Added deterministic table output serialization regression test (`TableResultSerializerTests`).
+- done: Strengthened manifest compatibility validation (`ManifestSemVer` 1.x + required compatibility fields) and regression tests.
+- done: Added CI-fast KIE/table smoke assets and script (`scripts/smoke-ci-fast.ps1`).

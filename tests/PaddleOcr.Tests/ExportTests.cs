@@ -57,4 +57,57 @@ public sealed class ExportTests
         ok.Should().BeFalse();
         message.Should().Contain("missing inference.json");
     }
+
+    [Fact]
+    public void ValidateManifestFile_Should_Fail_When_Compatibility_Missing()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pocr_export_test_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        File.WriteAllText(
+            Path.Combine(root, "manifest.json"),
+            """
+            {
+              "SchemaVersion": "1.0",
+              "Format": "onnx",
+              "ModelType": "det",
+              "CreatedAtUtc": "2026-02-07T00:00:00Z",
+              "ArtifactFile": "inference.onnx",
+              "OnnxInputs": [],
+              "OnnxOutputs": []
+            }
+            """);
+
+        var exporter = new NativeExporter(NullLogger.Instance);
+        var ok = exporter.ValidateManifestFile(root, out var message);
+
+        ok.Should().BeFalse();
+        message.ToLowerInvariant().Should().Contain("compatibility");
+    }
+
+    [Fact]
+    public void ValidateManifestFile_Should_Fail_When_ManifestSemVer_Not_1x()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pocr_export_test_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        File.WriteAllText(
+            Path.Combine(root, "manifest.json"),
+            """
+            {
+              "SchemaVersion": "1.0",
+              "Format": "onnx",
+              "ModelType": "det",
+              "CreatedAtUtc": "2026-02-07T00:00:00Z",
+              "ArtifactFile": "inference.onnx",
+              "Compatibility": { "ManifestSemVer": "2.0", "Runtime": "native", "BackwardCompatible": false },
+              "OnnxInputs": [],
+              "OnnxOutputs": []
+            }
+            """);
+
+        var exporter = new NativeExporter(NullLogger.Instance);
+        var ok = exporter.ValidateManifestFile(root, out var message);
+
+        ok.Should().BeFalse();
+        message.Should().Contain("unsupported manifest compatibility");
+    }
 }
