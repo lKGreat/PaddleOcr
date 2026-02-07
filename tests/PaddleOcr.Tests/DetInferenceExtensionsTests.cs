@@ -52,6 +52,10 @@ public sealed class DetInferenceExtensionsTests
                 ])
             ]
         };
+        var runtime = new Dictionary<string, DetRuntimeProfile>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["img0.png"] = new DetRuntimeProfile(1.2, 2.3, 3.4, 6.9)
+        };
 
         var options = NewOptions("DB") with
         {
@@ -60,13 +64,21 @@ public sealed class DetInferenceExtensionsTests
             DetMetricsPath = metricsPath
         };
 
-        DetInferenceExtensions.WriteDetMetrics(options, dir, predictions);
+        DetInferenceExtensions.WriteDetMetrics(options, dir, predictions, runtime);
 
         File.Exists(metricsPath).Should().BeTrue();
         using var doc = JsonDocument.Parse(File.ReadAllText(metricsPath));
+        doc.RootElement.GetProperty("schema_version").GetString().Should().Be("1.1");
         var quality = doc.RootElement.GetProperty("quality");
         quality.ValueKind.Should().Be(JsonValueKind.Object);
         quality.GetProperty("hmean").GetSingle().Should().BeGreaterThan(0.9f);
+        var perImage = doc.RootElement.GetProperty("per_image");
+        perImage.GetArrayLength().Should().Be(1);
+        perImage[0].GetProperty("image").GetString().Should().Be("img0.png");
+        perImage[0].GetProperty("hmean").GetSingle().Should().BeGreaterThan(0.9f);
+        var runtimeProfile = doc.RootElement.GetProperty("algorithm_runtime_profile");
+        runtimeProfile.GetProperty("image_count").GetInt32().Should().Be(1);
+        runtimeProfile.GetProperty("avg_total_ms").GetDouble().Should().BeApproximately(6.9d, 0.0001d);
     }
 
     private static DetOnnxOptions NewOptions(string algorithm)

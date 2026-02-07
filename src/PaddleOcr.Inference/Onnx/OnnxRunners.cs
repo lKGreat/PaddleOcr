@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Diagnostics;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using SixLabors.ImageSharp;
@@ -26,17 +27,29 @@ public sealed class DetOnnxRunner
 
         var lines = new List<string>(imageFiles.Count);
         var predictionByImage = new Dictionary<string, List<OcrBox>>(StringComparer.OrdinalIgnoreCase);
+        var runtimeByImage = new Dictionary<string, DetRuntimeProfile>(StringComparer.OrdinalIgnoreCase);
         foreach (var file in imageFiles)
         {
             using var img = Image.Load<Rgb24>(file);
-            var outputs = OnnxRuntimeUtils.RunSession(det, img, defaultSize, defaultSize, inputBuilderName);
+            var totalWatch = Stopwatch.StartNew();
+            var profiled = OnnxRuntimeUtils.RunSessionProfiled(det, img, defaultSize, defaultSize, inputBuilderName);
+            var outputs = profiled.Outputs;
+            var postWatch = Stopwatch.StartNew();
             var boxes = outputs.Count == 0
                 ? [PostprocessUtils.FullImageBox(img.Width, img.Height)]
                 : DetInferenceExtensions.DecodeBoxes(options, outputs, img.Width, img.Height);
             var sorted = PostprocessUtils.SortBoxes(boxes.Count == 0 ? [PostprocessUtils.FullImageBox(img.Width, img.Height)] : boxes);
+            postWatch.Stop();
+            totalWatch.Stop();
+            var imageName = Path.GetFileName(file);
+            runtimeByImage[imageName] = new DetRuntimeProfile(
+                profiled.PreprocessMs,
+                profiled.InferenceMs,
+                postWatch.Elapsed.TotalMilliseconds,
+                totalWatch.Elapsed.TotalMilliseconds);
             var payload = sorted.Select(b => new { transcription = "", points = b.Points }).ToList();
-            lines.Add($"{Path.GetFileName(file)}\t{JsonSerializer.Serialize(payload)}");
-            predictionByImage[Path.GetFileName(file)] = sorted;
+            lines.Add($"{imageName}\t{JsonSerializer.Serialize(payload)}");
+            predictionByImage[imageName] = sorted;
             OnnxRuntimeUtils.SaveVisualization(file, sorted, options.OutputDir);
         }
 
@@ -50,7 +63,7 @@ public sealed class DetOnnxRunner
         }
 
         File.WriteAllLines(resultPath, lines);
-        DetInferenceExtensions.WriteDetMetrics(options, options.OutputDir, predictionByImage);
+        DetInferenceExtensions.WriteDetMetrics(options, options.OutputDir, predictionByImage, runtimeByImage);
     }
 }
 
@@ -419,6 +432,7 @@ public static class TableResultSerializer
 }
 
 public sealed record TensorOutput(float[] Data, int[] Dims);
+public sealed record SessionRunProfile(List<TensorOutput> Outputs, double PreprocessMs, double InferenceMs);
 
 public sealed record DetOnnxOptions(
     string ImageDir,
@@ -531,7 +545,7 @@ public static class CharsetLoader
 
 public static class OnnxRuntimeUtils
 {
-    public static List<TensorOutput> RunSession(
+    public static SessionRunProfile RunSessionProfiled(
         InferenceSession session,
         string imageFile,
         int defaultH,
@@ -539,10 +553,10 @@ public static class OnnxRuntimeUtils
         string? inputBuilderName = null)
     {
         using var img = Image.Load<Rgb24>(imageFile);
-        return RunSession(session, img, defaultH, defaultW, inputBuilderName);
+        return RunSessionProfiled(session, img, defaultH, defaultW, inputBuilderName);
     }
 
-    public static List<TensorOutput> RunSession(
+    public static SessionRunProfile RunSessionProfiled(
         InferenceSession session,
         Image<Rgb24> image,
         int defaultH,
@@ -553,9 +567,45 @@ public static class OnnxRuntimeUtils
         var builder = string.IsNullOrWhiteSpace(inputBuilderName)
             ? InferencePreprocessRegistry.GetInputBuilder()
             : InferencePreprocessRegistry.GetInputBuilder(inputBuilderName);
+
+        var preprocessWatch = Stopwatch.StartNew();
         var tensor = builder(image, input.Value.Dimensions, defaultH, defaultW);
         var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(input.Key, tensor) };
+        preprocessWatch.Stop();
+
+        var inferenceWatch = Stopwatch.StartNew();
         using var outputs = session.Run(inputs);
+        var tensors = ConvertTensorOutputs(outputs);
+        inferenceWatch.Stop();
+
+        return new SessionRunProfile(
+            tensors,
+            preprocessWatch.Elapsed.TotalMilliseconds,
+            inferenceWatch.Elapsed.TotalMilliseconds);
+    }
+
+    public static List<TensorOutput> RunSession(
+        InferenceSession session,
+        string imageFile,
+        int defaultH,
+        int defaultW,
+        string? inputBuilderName = null)
+    {
+        return RunSessionProfiled(session, imageFile, defaultH, defaultW, inputBuilderName).Outputs;
+    }
+
+    public static List<TensorOutput> RunSession(
+        InferenceSession session,
+        Image<Rgb24> image,
+        int defaultH,
+        int defaultW,
+        string? inputBuilderName = null)
+    {
+        return RunSessionProfiled(session, image, defaultH, defaultW, inputBuilderName).Outputs;
+    }
+
+    private static List<TensorOutput> ConvertTensorOutputs(IDisposableReadOnlyCollection<DisposableNamedOnnxValue> outputs)
+    {
         var result = new List<TensorOutput>(outputs.Count);
         foreach (var outValue in outputs)
         {

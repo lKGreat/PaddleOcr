@@ -1,9 +1,21 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 
 namespace PaddleOcr.Inference.Onnx;
 
 public static class DetInferenceExtensions
 {
+    private static readonly IReadOnlyDictionary<string, IDetPostprocessorStrategy> Strategies =
+        new Dictionary<string, IDetPostprocessorStrategy>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["DB"] = new DbLikePostprocessor(),
+            ["DB++"] = new DbLikePostprocessor(),
+            ["EAST"] = new EastPostprocessor(),
+            ["SAST"] = new SastPostprocessor(),
+            ["PSE"] = new PsePostprocessor(),
+            ["FCE"] = new FcePostprocessor(),
+            ["CT"] = new CtPostprocessor()
+        };
+
     public static string ResolveInputBuilder(string algorithm)
     {
         if (algorithm.Equals("DB++", StringComparison.OrdinalIgnoreCase))
@@ -30,117 +42,11 @@ public static class DetInferenceExtensions
             return [];
         }
 
-        if (options.DetAlgorithm.Equals("DB", StringComparison.OrdinalIgnoreCase) ||
-            options.DetAlgorithm.Equals("DB++", StringComparison.OrdinalIgnoreCase))
-        {
-            var map = PickPrimary(outputs);
-            return PostprocessUtils.DetectBoxes(
-                map.Data,
-                map.Dims,
-                imageWidth,
-                imageHeight,
-                options.DetThresh,
-                options.DetBoxThresh,
-                options.DetUnclipRatio,
-                options.UseDilation,
-                options.BoxType);
-        }
-
-        if (options.DetAlgorithm.Equals("EAST", StringComparison.OrdinalIgnoreCase))
-        {
-            var score = PickScoreLike(outputs);
-            return PostprocessUtils.DetectBoxes(
-                score.Data,
-                score.Dims,
-                imageWidth,
-                imageHeight,
-                options.DetEastScoreThresh,
-                options.DetEastCoverThresh,
-                1.0f,
-                false,
-                options.BoxType);
-        }
-
-        if (options.DetAlgorithm.Equals("SAST", StringComparison.OrdinalIgnoreCase))
-        {
-            var score = PickScoreLike(outputs);
-            return PostprocessUtils.DetectBoxes(
-                score.Data,
-                score.Dims,
-                imageWidth,
-                imageHeight,
-                options.DetSastScoreThresh,
-                options.DetSastNmsThresh,
-                1.0f,
-                false,
-                options.BoxType);
-        }
-
-        if (options.DetAlgorithm.Equals("PSE", StringComparison.OrdinalIgnoreCase))
-        {
-            var map = PickPrimary(outputs);
-            var boxes = PostprocessUtils.DetectBoxes(
-                map.Data,
-                map.Dims,
-                imageWidth,
-                imageHeight,
-                options.DetPseThresh,
-                options.DetPseBoxThresh,
-                Math.Max(1.0f, options.DetPseScale),
-                options.UseDilation,
-                options.BoxType);
-            var minSide = Math.Max(1f, MathF.Sqrt(Math.Max(1f, options.DetPseMinArea)));
-            return boxes.Where(b => EstimateBoxShortSide(b) >= minSide).ToList();
-        }
-
-        if (options.DetAlgorithm.Equals("FCE", StringComparison.OrdinalIgnoreCase))
-        {
-            var boxes = new List<OcrBox>();
-            var baseThresh = Math.Clamp(options.DetThresh * options.FceAlpha / Math.Max(0.1f, options.FceBeta), 0.01f, 0.99f);
-            foreach (var level in outputs)
-            {
-                var levelBoxes = PostprocessUtils.DetectBoxes(
-                    level.Data,
-                    level.Dims,
-                    imageWidth,
-                    imageHeight,
-                    baseThresh,
-                    options.DetBoxThresh,
-                    options.DetUnclipRatio,
-                    options.UseDilation,
-                    options.BoxType);
-                boxes.AddRange(levelBoxes);
-            }
-
-            return DeduplicateByIou(boxes, 0.8f);
-        }
-
-        if (options.DetAlgorithm.Equals("CT", StringComparison.OrdinalIgnoreCase))
-        {
-            var score = PickScoreLike(outputs);
-            return PostprocessUtils.DetectBoxes(
-                score.Data,
-                score.Dims,
-                imageWidth,
-                imageHeight,
-                options.DetThresh,
-                options.DetBoxThresh,
-                1.0f,
-                false,
-                options.BoxType);
-        }
-
-        var fallback = PickPrimary(outputs);
-        return PostprocessUtils.DetectBoxes(
-            fallback.Data,
-            fallback.Dims,
-            imageWidth,
-            imageHeight,
-            options.DetThresh,
-            options.DetBoxThresh,
-            options.DetUnclipRatio,
-            options.UseDilation,
-            options.BoxType);
+        var strategy = Strategies.TryGetValue(options.DetAlgorithm, out var found)
+            ? found
+            : new DbLikePostprocessor();
+        var boxes = strategy.Decode(options, outputs, imageWidth, imageHeight);
+        return NormalizeBoxes(boxes, imageWidth, imageHeight, options.BoxType);
     }
 
     public static void WriteDetMetrics(
@@ -148,7 +54,16 @@ public static class DetInferenceExtensions
         string outputDir,
         IReadOnlyDictionary<string, List<OcrBox>> predictions)
     {
-        var payload = BuildMetricsPayload(options, predictions);
+        WriteDetMetrics(options, outputDir, predictions, new Dictionary<string, DetRuntimeProfile>());
+    }
+
+    public static void WriteDetMetrics(
+        DetOnnxOptions options,
+        string outputDir,
+        IReadOnlyDictionary<string, List<OcrBox>> predictions,
+        IReadOnlyDictionary<string, DetRuntimeProfile> runtimeProfiles)
+    {
+        var payload = BuildMetricsPayload(options, predictions, runtimeProfiles);
         var metricsPath = string.IsNullOrWhiteSpace(options.DetMetricsPath)
             ? Path.Combine(outputDir, "det_metrics.json")
             : options.DetMetricsPath;
@@ -161,13 +76,19 @@ public static class DetInferenceExtensions
         File.WriteAllText(metricsPath, JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true }));
     }
 
-    private static object BuildMetricsPayload(DetOnnxOptions options, IReadOnlyDictionary<string, List<OcrBox>> predictions)
+    private static object BuildMetricsPayload(
+        DetOnnxOptions options,
+        IReadOnlyDictionary<string, List<OcrBox>> predictions,
+        IReadOnlyDictionary<string, DetRuntimeProfile> runtimeProfiles)
     {
         var totalBoxes = predictions.Sum(x => x.Value.Count);
         var avgBoxes = predictions.Count == 0 ? 0f : totalBoxes / (float)predictions.Count;
         var quality = EvaluateQuality(predictions, options.DetGtLabelPath, options.DetEvalIouThresh);
+        var qualityPayload = BuildQualityPayload(quality);
+        var runtime = BuildRuntimeSummary(runtimeProfiles);
         return new
         {
+            schema_version = "1.1",
             algorithm = options.DetAlgorithm,
             image_count = predictions.Count,
             total_pred_boxes = totalBoxes,
@@ -179,12 +100,89 @@ public static class DetInferenceExtensions
                 det_db_unclip_ratio = options.DetUnclipRatio,
                 det_eval_iou_thresh = options.DetEvalIouThresh
             },
-            quality,
+            quality = qualityPayload,
+            per_image = BuildPerImageRows(predictions, quality?.Rows),
+            algorithm_runtime_profile = runtime,
             generated_at_utc = DateTime.UtcNow
         };
     }
 
-    private static object? EvaluateQuality(
+    private static object? BuildQualityPayload(QualitySummary? quality)
+    {
+        if (quality is null)
+        {
+            return null;
+        }
+
+        return new
+        {
+            precision = quality.Precision,
+            recall = quality.Recall,
+            hmean = quality.Hmean,
+            true_positive = quality.TruePositive,
+            false_positive = quality.FalsePositive,
+            false_negative = quality.FalseNegative,
+            iou_thresh = quality.IouThreshold
+        };
+    }
+
+    private static object BuildRuntimeSummary(IReadOnlyDictionary<string, DetRuntimeProfile> runtimeProfiles)
+    {
+        if (runtimeProfiles.Count == 0)
+        {
+            return new
+            {
+                image_count = 0,
+                avg_preprocess_ms = 0.0,
+                avg_inference_ms = 0.0,
+                avg_postprocess_ms = 0.0,
+                avg_total_ms = 0.0
+            };
+        }
+
+        return new
+        {
+            image_count = runtimeProfiles.Count,
+            avg_preprocess_ms = runtimeProfiles.Values.Average(x => x.PreprocessMs),
+            avg_inference_ms = runtimeProfiles.Values.Average(x => x.InferenceMs),
+            avg_postprocess_ms = runtimeProfiles.Values.Average(x => x.PostprocessMs),
+            avg_total_ms = runtimeProfiles.Values.Average(x => x.TotalMs)
+        };
+    }
+
+    private static IEnumerable<object> BuildPerImageRows(
+        IReadOnlyDictionary<string, List<OcrBox>> predictions,
+        IReadOnlyDictionary<string, QualityRow>? qualityRows)
+    {
+        foreach (var item in predictions.OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            if (qualityRows is not null && qualityRows.TryGetValue(item.Key, out var row))
+            {
+                yield return new
+                {
+                    image = item.Key,
+                    pred_count = item.Value.Count,
+                    gt_count = row.GtCount,
+                    tp = row.TruePositive,
+                    fp = row.FalsePositive,
+                    fn = row.FalseNegative,
+                    precision = row.Precision,
+                    recall = row.Recall,
+                    hmean = row.Hmean
+                };
+            }
+            else
+            {
+                yield return new
+                {
+                    image = item.Key,
+                    pred_count = item.Value.Count
+                };
+            }
+        }
+    }
+
+    private static QualitySummary? EvaluateQuality(
         IReadOnlyDictionary<string, List<OcrBox>> predictions,
         string? labelFilePath,
         float iouThresh)
@@ -204,58 +202,79 @@ public static class DetInferenceExtensions
         var tp = 0;
         var fp = 0;
         var fn = 0;
+        var rows = new Dictionary<string, QualityRow>(StringComparer.OrdinalIgnoreCase);
         foreach (var key in imageKeys)
         {
             var predBoxes = predictions.TryGetValue(key, out var pred) ? pred : [];
             var gtBoxes = gt.TryGetValue(key, out var g) ? g : [];
-
-            var gtMatched = new bool[gtBoxes.Count];
-            foreach (var predBox in predBoxes)
-            {
-                var best = -1;
-                var bestIou = 0f;
-                for (var i = 0; i < gtBoxes.Count; i++)
-                {
-                    if (gtMatched[i])
-                    {
-                        continue;
-                    }
-
-                    var iou = ComputeIou(predBox, gtBoxes[i]);
-                    if (iou > bestIou)
-                    {
-                        bestIou = iou;
-                        best = i;
-                    }
-                }
-
-                if (best >= 0 && bestIou >= iouThresh)
-                {
-                    gtMatched[best] = true;
-                    tp++;
-                }
-                else
-                {
-                    fp++;
-                }
-            }
-
-            fn += gtMatched.Count(x => !x);
+            var match = MatchByIou(predBoxes, gtBoxes, iouThresh);
+            tp += match.TruePositive;
+            fp += match.FalsePositive;
+            fn += match.FalseNegative;
+            rows[key] = new QualityRow(
+                GtCount: gtBoxes.Count,
+                TruePositive: match.TruePositive,
+                FalsePositive: match.FalsePositive,
+                FalseNegative: match.FalseNegative,
+                Precision: match.Precision,
+                Recall: match.Recall,
+                Hmean: match.Hmean);
         }
 
         var precision = tp + fp == 0 ? 0f : tp / (float)(tp + fp);
         var recall = tp + fn == 0 ? 0f : tp / (float)(tp + fn);
         var hmean = precision + recall <= 0f ? 0f : 2f * precision * recall / (precision + recall);
-        return new
+        return new QualitySummary(
+            Precision: precision,
+            Recall: recall,
+            Hmean: hmean,
+            TruePositive: tp,
+            FalsePositive: fp,
+            FalseNegative: fn,
+            IouThreshold: iouThresh,
+            Rows: rows);
+    }
+
+    private static MatchSummary MatchByIou(IReadOnlyList<OcrBox> predBoxes, IReadOnlyList<OcrBox> gtBoxes, float iouThresh)
+    {
+        var gtMatched = new bool[gtBoxes.Count];
+        var tp = 0;
+        var fp = 0;
+        foreach (var predBox in predBoxes)
         {
-            precision,
-            recall,
-            hmean,
-            true_positive = tp,
-            false_positive = fp,
-            false_negative = fn,
-            iou_thresh = iouThresh
-        };
+            var best = -1;
+            var bestIou = 0f;
+            for (var i = 0; i < gtBoxes.Count; i++)
+            {
+                if (gtMatched[i])
+                {
+                    continue;
+                }
+
+                var iou = ComputeIou(predBox, gtBoxes[i]);
+                if (iou > bestIou)
+                {
+                    bestIou = iou;
+                    best = i;
+                }
+            }
+
+            if (best >= 0 && bestIou >= iouThresh)
+            {
+                gtMatched[best] = true;
+                tp++;
+            }
+            else
+            {
+                fp++;
+            }
+        }
+
+        var fn = gtMatched.Count(x => !x);
+        var precision = tp + fp == 0 ? 0f : tp / (float)(tp + fp);
+        var recall = tp + fn == 0 ? 0f : tp / (float)(tp + fn);
+        var hmean = precision + recall <= 0f ? 0f : 2f * precision * recall / (precision + recall);
+        return new MatchSummary(tp, fp, fn, precision, recall, hmean);
     }
 
     private static Dictionary<string, List<OcrBox>> LoadGroundTruth(string labelFilePath)
@@ -336,6 +355,61 @@ public static class DetInferenceExtensions
         return true;
     }
 
+    private static List<OcrBox> NormalizeBoxes(IReadOnlyList<OcrBox> boxes, int width, int height, string boxType)
+    {
+        var normalized = new List<OcrBox>(boxes.Count);
+        foreach (var box in boxes)
+        {
+            if (box.Points.Length < 4)
+            {
+                continue;
+            }
+
+            var points = box.Points
+                .Select(p => new[]
+                {
+                    Math.Clamp(p[0], 0, Math.Max(0, width - 1)),
+                    Math.Clamp(p[1], 0, Math.Max(0, height - 1))
+                })
+                .ToArray();
+
+            if (boxType.Equals("quad", StringComparison.OrdinalIgnoreCase))
+            {
+                points = EnsureQuadOrder(points);
+            }
+
+            var xs = points.Select(x => x[0]).ToArray();
+            var ys = points.Select(x => x[1]).ToArray();
+            var w = Math.Max(1, xs.Max() - xs.Min() + 1);
+            var h = Math.Max(1, ys.Max() - ys.Min() + 1);
+            if (w < 2 || h < 2)
+            {
+                continue;
+            }
+
+            normalized.Add(new OcrBox(points));
+        }
+
+        return normalized;
+    }
+
+    private static int[][] EnsureQuadOrder(int[][] points)
+    {
+        if (points.Length < 4)
+        {
+            return points;
+        }
+
+        var rect = new int[4][];
+        var sums = points.Select(p => p[0] + p[1]).ToArray();
+        var diffs = points.Select(p => p[1] - p[0]).ToArray();
+        rect[0] = points[Array.IndexOf(sums, sums.Min())];
+        rect[2] = points[Array.IndexOf(sums, sums.Max())];
+        rect[1] = points[Array.IndexOf(diffs, diffs.Min())];
+        rect[3] = points[Array.IndexOf(diffs, diffs.Max())];
+        return rect;
+    }
+
     private static TensorOutput PickPrimary(IReadOnlyList<TensorOutput> outputs)
     {
         return outputs
@@ -377,24 +451,33 @@ public static class DetInferenceExtensions
         return Math.Min(w, h);
     }
 
-    private static List<OcrBox> DeduplicateByIou(List<OcrBox> boxes, float iouThreshold)
+    private static List<OcrBox> NonMaxSuppression(IReadOnlyList<OcrBox> boxes, float iouThreshold)
     {
         if (boxes.Count <= 1)
         {
-            return boxes;
+            return boxes.ToList();
         }
 
-        var result = new List<OcrBox>(boxes.Count);
-        foreach (var box in boxes)
+        var ordered = boxes
+            .OrderByDescending(BoxArea)
+            .ToList();
+        var kept = new List<OcrBox>(ordered.Count);
+        foreach (var box in ordered)
         {
-            var duplicate = result.Any(existing => ComputeIou(existing, box) >= iouThreshold);
-            if (!duplicate)
+            var suppressed = kept.Any(existing => ComputeIou(existing, box) >= iouThreshold);
+            if (!suppressed)
             {
-                result.Add(box);
+                kept.Add(box);
             }
         }
 
-        return result;
+        return kept;
+    }
+
+    private static float BoxArea(OcrBox box)
+    {
+        var (x1, y1, x2, y2) = ToRect(box);
+        return Math.Max(1f, (x2 - x1 + 1f) * (y2 - y1 + 1f));
     }
 
     private static float ComputeIou(OcrBox a, OcrBox b)
@@ -423,4 +506,166 @@ public static class DetInferenceExtensions
         var ys = box.Points.Select(p => (float)p[1]).ToArray();
         return (xs.Min(), ys.Min(), xs.Max(), ys.Max());
     }
+
+    private interface IDetPostprocessorStrategy
+    {
+        List<OcrBox> Decode(DetOnnxOptions options, IReadOnlyList<TensorOutput> outputs, int imageWidth, int imageHeight);
+    }
+
+    private sealed class DbLikePostprocessor : IDetPostprocessorStrategy
+    {
+        public List<OcrBox> Decode(DetOnnxOptions options, IReadOnlyList<TensorOutput> outputs, int imageWidth, int imageHeight)
+        {
+            var map = PickPrimary(outputs);
+            var boxes = PostprocessUtils.DetectBoxes(
+                map.Data,
+                map.Dims,
+                imageWidth,
+                imageHeight,
+                options.DetThresh,
+                options.DetBoxThresh,
+                options.DetUnclipRatio,
+                options.UseDilation,
+                options.BoxType);
+            return NonMaxSuppression(boxes, 0.6f);
+        }
+    }
+
+    private sealed class EastPostprocessor : IDetPostprocessorStrategy
+    {
+        public List<OcrBox> Decode(DetOnnxOptions options, IReadOnlyList<TensorOutput> outputs, int imageWidth, int imageHeight)
+        {
+            var score = PickScoreLike(outputs);
+            var boxes = PostprocessUtils.DetectBoxes(
+                score.Data,
+                score.Dims,
+                imageWidth,
+                imageHeight,
+                options.DetEastScoreThresh,
+                options.DetEastCoverThresh,
+                1.0f,
+                false,
+                options.BoxType);
+            return NonMaxSuppression(boxes, options.DetEastNmsThresh);
+        }
+    }
+
+    private sealed class SastPostprocessor : IDetPostprocessorStrategy
+    {
+        public List<OcrBox> Decode(DetOnnxOptions options, IReadOnlyList<TensorOutput> outputs, int imageWidth, int imageHeight)
+        {
+            var score = PickScoreLike(outputs);
+            var boxes = PostprocessUtils.DetectBoxes(
+                score.Data,
+                score.Dims,
+                imageWidth,
+                imageHeight,
+                options.DetSastScoreThresh,
+                options.DetSastScoreThresh,
+                1.0f,
+                false,
+                options.BoxType);
+            return NonMaxSuppression(boxes, options.DetSastNmsThresh);
+        }
+    }
+
+    private sealed class PsePostprocessor : IDetPostprocessorStrategy
+    {
+        public List<OcrBox> Decode(DetOnnxOptions options, IReadOnlyList<TensorOutput> outputs, int imageWidth, int imageHeight)
+        {
+            var map = PickPrimary(outputs);
+            var boxes = PostprocessUtils.DetectBoxes(
+                map.Data,
+                map.Dims,
+                imageWidth,
+                imageHeight,
+                options.DetPseThresh,
+                options.DetPseBoxThresh,
+                Math.Max(1.0f, options.DetPseScale),
+                options.UseDilation,
+                options.BoxType);
+            var minSide = Math.Max(1f, MathF.Sqrt(Math.Max(1f, options.DetPseMinArea)));
+            return boxes
+                .Where(b => EstimateBoxShortSide(b) >= minSide)
+                .ToList();
+        }
+    }
+
+    private sealed class FcePostprocessor : IDetPostprocessorStrategy
+    {
+        public List<OcrBox> Decode(DetOnnxOptions options, IReadOnlyList<TensorOutput> outputs, int imageWidth, int imageHeight)
+        {
+            var boxes = new List<OcrBox>();
+            var baseThresh = Math.Clamp(options.DetThresh * options.FceAlpha / Math.Max(0.1f, options.FceBeta), 0.01f, 0.99f);
+            var levelCount = Math.Min(options.FceScales.Count, outputs.Count);
+            for (var i = 0; i < levelCount; i++)
+            {
+                var level = outputs[i];
+                var levelBoxes = PostprocessUtils.DetectBoxes(
+                    level.Data,
+                    level.Dims,
+                    imageWidth,
+                    imageHeight,
+                    baseThresh,
+                    options.DetBoxThresh,
+                    options.DetUnclipRatio,
+                    options.UseDilation,
+                    options.BoxType);
+                boxes.AddRange(levelBoxes);
+            }
+
+            return NonMaxSuppression(boxes, 0.8f);
+        }
+    }
+
+    private sealed class CtPostprocessor : IDetPostprocessorStrategy
+    {
+        public List<OcrBox> Decode(DetOnnxOptions options, IReadOnlyList<TensorOutput> outputs, int imageWidth, int imageHeight)
+        {
+            var score = PickScoreLike(outputs);
+            return PostprocessUtils.DetectBoxes(
+                score.Data,
+                score.Dims,
+                imageWidth,
+                imageHeight,
+                options.DetThresh,
+                options.DetBoxThresh,
+                1.0f,
+                false,
+                options.BoxType);
+        }
+    }
 }
+
+public sealed record DetRuntimeProfile(
+    double PreprocessMs,
+    double InferenceMs,
+    double PostprocessMs,
+    double TotalMs);
+
+internal sealed record QualitySummary(
+    float Precision,
+    float Recall,
+    float Hmean,
+    int TruePositive,
+    int FalsePositive,
+    int FalseNegative,
+    float IouThreshold,
+    IReadOnlyDictionary<string, QualityRow> Rows);
+
+internal sealed record QualityRow(
+    int GtCount,
+    int TruePositive,
+    int FalsePositive,
+    int FalseNegative,
+    float Precision,
+    float Recall,
+    float Hmean);
+
+internal sealed record MatchSummary(
+    int TruePositive,
+    int FalsePositive,
+    int FalseNegative,
+    float Precision,
+    float Recall,
+    float Hmean);
