@@ -12,5 +12,8 @@ public sealed record TrainingRunSummary(
     bool EarlyStopped,
     string SaveDir,
     string? ResumeCheckpoint,
-    DateTime GeneratedAtUtc);
-
+    DateTime GeneratedAtUtc,
+    int? Seed = null,
+    string? Device = null,
+    string? EarlyStopReason = null,
+    bool? NanDetected = null);

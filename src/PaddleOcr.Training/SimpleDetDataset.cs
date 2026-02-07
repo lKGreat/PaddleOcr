@@ -10,13 +10,21 @@ internal sealed class SimpleDetDataset
     private readonly List<DetSample> _samples;
     private readonly int _size;
 
-    public SimpleDetDataset(string labelFile, string dataDir, int inputSize)
+    public SimpleDetDataset(
+        string labelFile,
+        string dataDir,
+        int inputSize,
+        string invalidSamplePolicy = "skip",
+        int minValidSamples = 1)
     {
         _size = inputSize;
-        _samples = LoadSamples(labelFile, dataDir);
+        var loaded = LoadSamples(labelFile, dataDir, invalidSamplePolicy, minValidSamples);
+        _samples = loaded.Samples;
+        Audit = loaded.Audit;
     }
 
     public int Count => _samples.Count;
+    public DetDataAudit Audit { get; }
 
     public IEnumerable<(float[] Images, float[] Masks, int Batch)> GetBatches(int batchSize, bool shuffle, Random rng)
     {
@@ -120,24 +128,45 @@ internal sealed class SimpleDetDataset
         return inside;
     }
 
-    private static List<DetSample> LoadSamples(string labelFile, string dataDir)
+    private static (List<DetSample> Samples, DetDataAudit Audit) LoadSamples(
+        string labelFile,
+        string dataDir,
+        string invalidSamplePolicy,
+        int minValidSamples)
     {
         if (!File.Exists(labelFile))
         {
             throw new FileNotFoundException($"Label file not found: {labelFile}");
         }
 
+        var policy = invalidSamplePolicy.Equals("fail", StringComparison.OrdinalIgnoreCase) ? "fail" : "skip";
+        var minSamples = Math.Max(1, minValidSamples);
+        var audit = new DetDataAudit
+        {
+            LabelFile = labelFile,
+            DataDir = dataDir,
+            InvalidSamplePolicy = policy
+        };
         var result = new List<DetSample>();
+        var lineNumber = 0;
         foreach (var line in File.ReadLines(labelFile))
         {
+            lineNumber++;
+            audit.TotalLines++;
             if (string.IsNullOrWhiteSpace(line))
             {
+                AddSkipped(audit, "empty_line", lineNumber, line);
                 continue;
             }
 
             var tab = line.IndexOf('\t');
             if (tab <= 0 || tab >= line.Length - 1)
             {
+                if (OnInvalid(policy, "missing_tab_separator", lineNumber, line, audit, out var ex))
+                {
+                    throw ex;
+                }
+
                 continue;
             }
 
@@ -146,30 +175,78 @@ internal sealed class SimpleDetDataset
             var fullPath = Path.IsPathRooted(imageRel) ? imageRel : Path.GetFullPath(Path.Combine(dataDir, imageRel));
             if (!File.Exists(fullPath))
             {
+                if (OnInvalid(policy, "missing_image_file", lineNumber, imageRel, audit, out var ex))
+                {
+                    throw ex;
+                }
+
                 continue;
             }
 
-            var polys = ParsePolygons(json);
+            if (!TryParsePolygons(json, out var polys, out var reason))
+            {
+                if (OnInvalid(policy, reason, lineNumber, imageRel, audit, out var ex))
+                {
+                    throw ex;
+                }
+
+                continue;
+            }
+
             result.Add(new DetSample(fullPath, polys));
         }
 
-        if (result.Count == 0)
+        audit.ValidSamples = result.Count;
+        if (result.Count < minSamples)
         {
-            throw new InvalidOperationException("No valid det samples found.");
+            throw new InvalidOperationException(
+                $"det dataset has insufficient valid samples: {result.Count} < {minSamples}. " +
+                $"label_file={labelFile}");
         }
 
-        return result;
+        return (result, audit);
     }
 
-    private static List<int[][]> ParsePolygons(string json)
+    private static bool OnInvalid(
+        string policy,
+        string reason,
+        int lineNumber,
+        string detail,
+        DetDataAudit audit,
+        out InvalidOperationException exception)
     {
-        var list = new List<int[][]>();
+        exception = new InvalidOperationException(
+            $"invalid det sample at line {lineNumber}: reason={reason}, detail={detail}");
+        if (policy == "fail")
+        {
+            return true;
+        }
+
+        AddSkipped(audit, reason, lineNumber, detail);
+        return false;
+    }
+
+    private static void AddSkipped(DetDataAudit audit, string reason, int lineNumber, string detail)
+    {
+        audit.SkippedSamples++;
+        audit.SkippedByReason[reason] = audit.SkippedByReason.GetValueOrDefault(reason) + 1;
+        if (audit.Examples.Count < 10)
+        {
+            audit.Examples.Add($"line={lineNumber}, reason={reason}, detail={detail}");
+        }
+    }
+
+    private static bool TryParsePolygons(string json, out List<int[][]> polygons, out string reason)
+    {
+        polygons = [];
+        reason = "invalid_json";
         try
         {
             using var doc = JsonDocument.Parse(json);
             if (doc.RootElement.ValueKind != JsonValueKind.Array)
             {
-                return list;
+                reason = "invalid_json_root";
+                return false;
             }
 
             foreach (var item in doc.RootElement.EnumerateArray())
@@ -184,23 +261,48 @@ internal sealed class SimpleDetDataset
                 {
                     if (p.ValueKind == JsonValueKind.Array && p.GetArrayLength() >= 2)
                     {
-                        poly.Add([p[0].GetInt32(), p[1].GetInt32()]);
+                        if (!p[0].TryGetInt32(out var x) || !p[1].TryGetInt32(out var y))
+                        {
+                            continue;
+                        }
+
+                        poly.Add([x, y]);
                     }
                 }
 
                 if (poly.Count >= 4)
                 {
-                    list.Add(poly.ToArray());
+                    polygons.Add(poly.ToArray());
                 }
             }
+
+            if (polygons.Count == 0)
+            {
+                reason = "empty_or_invalid_polygon";
+                return false;
+            }
+
+            reason = string.Empty;
+            return true;
         }
         catch
         {
-            return list;
+            reason = "invalid_json";
+            return false;
         }
-
-        return list;
     }
 }
 
 internal sealed record DetSample(string ImagePath, List<int[][]> Polygons);
+
+internal sealed class DetDataAudit
+{
+    public string LabelFile { get; init; } = string.Empty;
+    public string DataDir { get; init; } = string.Empty;
+    public string InvalidSamplePolicy { get; init; } = "skip";
+    public int TotalLines { get; set; }
+    public int ValidSamples { get; set; }
+    public int SkippedSamples { get; set; }
+    public Dictionary<string, int> SkippedByReason { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public List<string> Examples { get; } = [];
+}

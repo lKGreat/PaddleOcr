@@ -22,8 +22,10 @@ Output:
 
 Training benchmark fixture:
 - `assets/configs/local/train_bench_rec_ci_fast.yml`
+- `assets/configs/local/train_bench_det_ci_fast.yml`
 - Example:
   - `pocr benchmark run --scenario train:train -c assets/configs/local/train_bench_rec_ci_fast.yml --warmup 0 --iterations 1`
+  - `pocr benchmark run --scenario train:train -c assets/configs/local/train_bench_det_ci_fast.yml --warmup 0 --iterations 1`
 
 ## Plugin package command
 

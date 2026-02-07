@@ -31,6 +31,7 @@ try {
     Invoke-Step "config check kie_ci_fast" @("config", "check", "-c", "assets/configs/local/kie_ci_fast.yml")
     Invoke-Step "doctor parity table" @("doctor", "parity-table-kie", "-c", "assets/configs/local/table_ci_fast.yml", "--mode", "table")
     Invoke-Step "doctor parity kie" @("doctor", "parity-table-kie", "-c", "assets/configs/local/kie_ci_fast.yml", "--mode", "kie")
+    Invoke-Step "doctor train det ready" @("doctor", "train-det-ready", "-c", "assets/configs/local/train_bench_det_ci_fast.yml")
 
     $pluginDir = Join-Path $env:TEMP ("pocr_accept_plugin_" + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $pluginDir -Force | Out-Null
@@ -60,6 +61,7 @@ try {
 
     Invoke-Step "benchmark e2e:eval" @("benchmark", "run", "--scenario", "e2e:eval", "--gt_dir", "assets/samples/tiny_det/images", "--pred_dir", "assets/samples/tiny_det/images", "--warmup", "0", "--iterations", "1")
     Invoke-Step "benchmark train:train" @("benchmark", "run", "--scenario", "train:train", "-c", "assets/configs/local/train_bench_rec_ci_fast.yml", "--warmup", "0", "--iterations", "1")
+    Invoke-Step "benchmark train:train(det)" @("benchmark", "run", "--scenario", "train:train", "-c", "assets/configs/local/train_bench_det_ci_fast.yml", "--warmup", "0", "--iterations", "1")
 
     if (-not [string]::IsNullOrWhiteSpace($ServiceUrl)) {
         Invoke-Step "benchmark service:test" @("benchmark", "run", "--scenario", "service:test", "--profile", "smoke", "--server_url", $ServiceUrl, "--image_dir", "assets/samples/tiny_cls/images", "--warmup", "0", "--iterations", "1", "--continue_on_error", "true")

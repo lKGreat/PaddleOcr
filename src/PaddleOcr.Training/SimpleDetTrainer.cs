@@ -1,4 +1,8 @@
-﻿using Microsoft.Extensions.Logging;
+using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using TorchSharp;
 using static TorchSharp.torch;
 using static TorchSharp.torch.nn;
@@ -16,20 +20,38 @@ internal sealed class SimpleDetTrainer
 
     public TrainingSummary Train(TrainingConfigView cfg)
     {
+        SeedEverything(cfg.Seed);
         var size = cfg.DetInputSize;
-        var trainSet = new SimpleDetDataset(cfg.TrainLabelFile, cfg.DataDir, size);
-        var evalSet = new SimpleDetDataset(cfg.EvalLabelFile, cfg.EvalDataDir, size);
+        var trainSet = new SimpleDetDataset(cfg.TrainLabelFile, cfg.DataDir, size, cfg.InvalidSamplePolicy, cfg.MinValidSamples);
+        var evalSet = new SimpleDetDataset(cfg.EvalLabelFile, cfg.EvalDataDir, size, cfg.InvalidSamplePolicy, cfg.MinValidSamples);
 
-        var dev = cuda.is_available() ? CUDA : CPU;
+        var dev = ResolveDevice(cfg);
+        _logger.LogInformation("Training(det) device: {Device}", dev.type);
+        _logger.LogInformation("Train samples: {TrainCount}, Eval samples: {EvalCount}", trainSet.Count, evalSet.Count);
+        _logger.LogInformation("deterministic={Deterministic}, seed={Seed}", cfg.Deterministic, cfg.Seed);
+
+        Directory.CreateDirectory(cfg.SaveModelDir);
+        var configFingerprint = BuildDetConfigFingerprint(cfg);
+        var ckptMeta = new DetCheckpointMeta(
+            ModelType: "det",
+            InputSize: size,
+            Seed: cfg.Seed,
+            Deterministic: cfg.Deterministic,
+            ConfigFingerprint: configFingerprint,
+            GeneratedAtUtc: DateTime.UtcNow);
+        WriteDataAudit(cfg.SaveModelDir, trainSet.Audit, evalSet.Audit);
+        ResetHistory(cfg.SaveModelDir);
+
         using var model = new SimpleDetNet();
         model.to(dev);
         var lr = cfg.LearningRate;
         var optimizer = torch.optim.Adam(model.parameters(), lr: lr);
-        var rng = new Random(1024);
-        Directory.CreateDirectory(cfg.SaveModelDir);
+        var rng = new Random(cfg.Seed);
+        var evalRng = new Random(cfg.Seed + 17);
         var resumeCkpt = cfg.ResumeTraining ? ResolveEvalCheckpoint(cfg) : null;
-        if (!string.IsNullOrWhiteSpace(resumeCkpt))
+        if (!string.IsNullOrWhiteSpace(resumeCkpt) && File.Exists(resumeCkpt))
         {
+            ValidateCheckpointMetaOrThrow(resumeCkpt, ckptMeta);
             _logger.LogInformation("Loading checkpoint: {Path}", resumeCkpt);
             model.load(resumeCkpt);
         }
@@ -38,8 +60,12 @@ internal sealed class SimpleDetTrainer
         var epochsCompleted = 0;
         var staleEpochs = 0;
         var earlyStopped = false;
+        var earlyStopReason = string.Empty;
+        var nanDetected = false;
+        var stopTraining = false;
         for (var epoch = 1; epoch <= cfg.EpochNum; epoch++)
         {
+            var sw = Stopwatch.StartNew();
             if (cfg.LrDecayStep > 0 && epoch > 1 && (epoch - 1) % cfg.LrDecayStep == 0)
             {
                 lr *= cfg.LrDecayGamma;
@@ -58,88 +84,132 @@ internal sealed class SimpleDetTrainer
                 optimizer.zero_grad();
                 using var pred = model.call(x);
                 using var loss = functional.binary_cross_entropy_with_logits(pred, y);
+                var lossValue = loss.ToSingle();
+                if (cfg.NanGuard && !IsFinite(lossValue))
+                {
+                    nanDetected = true;
+                    earlyStopReason = "nan_guard";
+                    stopTraining = true;
+                    _logger.LogError("det nan guard triggered at epoch={Epoch}: loss is NaN/Inf", epoch);
+                    break;
+                }
+
                 loss.backward();
                 if (cfg.GradClipNorm > 0f)
                 {
                     torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.GradClipNorm);
                 }
+
                 optimizer.step();
-                lossSum += loss.ToSingle() * batch;
+                lossSum += lossValue * batch;
                 samples += batch;
             }
 
-            var metrics = Evaluate(model, evalSet, cfg.EvalBatchSize, size, dev);
-            if (metrics.Fscore > bestFscore)
+            if (stopTraining)
+            {
+                break;
+            }
+
+            var metrics = Evaluate(model, evalSet, cfg.EvalBatchSize, size, dev, evalRng);
+            if (metrics.Fscore > bestFscore + cfg.MinImproveDelta)
             {
                 bestFscore = metrics.Fscore;
                 staleEpochs = 0;
-                model.save(Path.Combine(cfg.SaveModelDir, "best.pt"));
+                SaveCheckpointWithMeta(cfg.SaveModelDir, model, "best.pt", ckptMeta with { GeneratedAtUtc = DateTime.UtcNow });
             }
             else
             {
                 staleEpochs++;
             }
 
-            model.save(Path.Combine(cfg.SaveModelDir, "latest.pt"));
+            SaveCheckpointWithMeta(cfg.SaveModelDir, model, "latest.pt", ckptMeta with { GeneratedAtUtc = DateTime.UtcNow });
+            sw.Stop();
+
+            var trainLoss = lossSum / Math.Max(1, samples);
             _logger.LogInformation(
                 "epoch={Epoch}/{Total} train_loss={Loss:F4} eval_p={P:F4} eval_r={R:F4} eval_f={F:F4} eval_iou={IoU:F4}",
-                epoch, cfg.EpochNum, lossSum / Math.Max(1, samples), metrics.Precision, metrics.Recall, metrics.Fscore, metrics.Iou);
+                epoch, cfg.EpochNum, trainLoss, metrics.Precision, metrics.Recall, metrics.Fscore, metrics.Iou);
+            AppendHistory(cfg.SaveModelDir, new DetTrainHistoryEntry(
+                Epoch: epoch,
+                TrainLoss: trainLoss,
+                EvalPrecision: metrics.Precision,
+                EvalRecall: metrics.Recall,
+                EvalFscore: metrics.Fscore,
+                EvalIou: metrics.Iou,
+                LearningRate: lr,
+                EpochTimeMs: sw.Elapsed.TotalMilliseconds));
             epochsCompleted = epoch;
             if (cfg.EarlyStopPatience > 0 && staleEpochs >= cfg.EarlyStopPatience)
             {
                 earlyStopped = true;
+                earlyStopReason = "patience";
                 _logger.LogInformation("early stop triggered at epoch {Epoch} (patience={Patience})", epoch, cfg.EarlyStopPatience);
                 break;
             }
         }
 
         optimizer.Dispose();
-        var summary = new TrainingSummary(epochsCompleted, bestFscore, cfg.SaveModelDir);
-        Directory.CreateDirectory(cfg.SaveModelDir);
-        File.WriteAllText(Path.Combine(cfg.SaveModelDir, "train_result.json"), System.Text.Json.JsonSerializer.Serialize(summary));
+        var best = bestFscore < 0f ? 0f : bestFscore;
+        var summary = new TrainingSummary(epochsCompleted, best, cfg.SaveModelDir);
+        var result = new DetTrainingResult(
+            Epochs: summary.Epochs,
+            BestAccuracy: summary.BestAccuracy,
+            SaveDir: summary.SaveDir,
+            Seed: cfg.Seed,
+            Device: dev.type.ToString(),
+            EarlyStopReason: string.IsNullOrWhiteSpace(earlyStopReason) ? null : earlyStopReason,
+            NanDetected: nanDetected);
+        File.WriteAllText(
+            Path.Combine(cfg.SaveModelDir, "train_result.json"),
+            JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
         var run = new TrainingRunSummary(
             ModelType: "det",
             EpochsRequested: cfg.EpochNum,
             EpochsCompleted: summary.Epochs,
             BestMetricName: "fscore",
             BestMetricValue: summary.BestAccuracy,
-            EarlyStopped: earlyStopped,
+            EarlyStopped: earlyStopped || nanDetected,
             SaveDir: cfg.SaveModelDir,
             ResumeCheckpoint: resumeCkpt,
-            GeneratedAtUtc: DateTime.UtcNow);
+            GeneratedAtUtc: DateTime.UtcNow,
+            Seed: cfg.Seed,
+            Device: dev.type.ToString(),
+            EarlyStopReason: string.IsNullOrWhiteSpace(earlyStopReason) ? null : earlyStopReason,
+            NanDetected: nanDetected);
         File.WriteAllText(
             Path.Combine(cfg.SaveModelDir, "train_run_summary.json"),
-            System.Text.Json.JsonSerializer.Serialize(run, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+            JsonSerializer.Serialize(run, new JsonSerializerOptions { WriteIndented = true }));
         return summary;
     }
 
     public EvaluationSummary Eval(TrainingConfigView cfg)
     {
+        SeedEverything(cfg.Seed);
         var size = cfg.DetInputSize;
-        var evalSet = new SimpleDetDataset(cfg.EvalLabelFile, cfg.EvalDataDir, size);
-        var dev = cuda.is_available() ? CUDA : CPU;
+        var evalSet = new SimpleDetDataset(cfg.EvalLabelFile, cfg.EvalDataDir, size, cfg.InvalidSamplePolicy, cfg.MinValidSamples);
+        var dev = ResolveDevice(cfg);
         using var model = new SimpleDetNet();
         model.to(dev);
 
         var ckpt = ResolveEvalCheckpoint(cfg);
-        if (File.Exists(ckpt))
+        if (!string.IsNullOrWhiteSpace(ckpt) && File.Exists(ckpt))
         {
             _logger.LogInformation("Loading checkpoint: {Path}", ckpt);
             model.load(ckpt);
         }
 
-        var metrics = Evaluate(model, evalSet, cfg.EvalBatchSize, size, dev);
+        var metrics = Evaluate(model, evalSet, cfg.EvalBatchSize, size, dev, new Random(cfg.Seed + 23));
         Directory.CreateDirectory(cfg.SaveModelDir);
         File.WriteAllText(
             Path.Combine(cfg.SaveModelDir, "eval_result.json"),
-            System.Text.Json.JsonSerializer.Serialize(metrics, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+            JsonSerializer.Serialize(metrics, new JsonSerializerOptions { WriteIndented = true }));
         _logger.LogInformation(
             "det eval metrics: precision={P:F4}, recall={R:F4}, fscore={F:F4}, iou={IoU:F4}",
             metrics.Precision, metrics.Recall, metrics.Fscore, metrics.Iou);
         return new EvaluationSummary(metrics.Iou, evalSet.Count);
     }
 
-    private static DetEvalMetrics Evaluate(SimpleDetNet model, SimpleDetDataset evalSet, int batchSize, int size, Device dev)
+    private static DetEvalMetrics Evaluate(SimpleDetNet model, SimpleDetDataset evalSet, int batchSize, int size, Device dev, Random evalRng)
     {
         model.eval();
         var interSum = 0f;
@@ -147,7 +217,7 @@ internal sealed class SimpleDetTrainer
         var predSum = 0f;
         var gtSum = 0f;
         using var noGrad = torch.no_grad();
-        foreach (var (images, masks, batch) in evalSet.GetBatches(batchSize, false, new Random(7)))
+        foreach (var (images, masks, batch) in evalSet.GetBatches(batchSize, false, evalRng))
         {
             using var x = torch.tensor(images, dtype: ScalarType.Float32).reshape(batch, 3, size, size).to(dev);
             using var y = torch.tensor(masks, dtype: ScalarType.Float32).reshape(batch, 1, size, size).to(dev);
@@ -171,7 +241,32 @@ internal sealed class SimpleDetTrainer
         return new DetEvalMetrics(precision, recall, f, iou);
     }
 
-    private static string ResolveEvalCheckpoint(TrainingConfigView cfg)
+    private static void SeedEverything(int seed)
+    {
+        torch.random.manual_seed(seed);
+    }
+
+    private static bool IsFinite(float value)
+    {
+        return !float.IsNaN(value) && !float.IsInfinity(value);
+    }
+
+    private static Device ResolveDevice(TrainingConfigView cfg)
+    {
+        if (cfg.Device.Equals("cpu", StringComparison.OrdinalIgnoreCase))
+        {
+            return CPU;
+        }
+
+        if (cfg.Device.Equals("auto", StringComparison.OrdinalIgnoreCase) && cuda.is_available())
+        {
+            return CUDA;
+        }
+
+        return CPU;
+    }
+
+    private static string? ResolveEvalCheckpoint(TrainingConfigView cfg)
     {
         if (!string.IsNullOrWhiteSpace(cfg.Checkpoints))
         {
@@ -184,7 +279,93 @@ internal sealed class SimpleDetTrainer
             return best;
         }
 
-        return Path.Combine(cfg.SaveModelDir, "latest.pt");
+        var latest = Path.Combine(cfg.SaveModelDir, "latest.pt");
+        if (File.Exists(latest))
+        {
+            return latest;
+        }
+
+        return null;
+    }
+
+    private static string BuildDetConfigFingerprint(TrainingConfigView cfg)
+    {
+        var raw = string.Join('|', new[]
+        {
+            cfg.ModelType,
+            cfg.DetInputSize.ToString(),
+            cfg.BatchSize.ToString(),
+            cfg.EvalBatchSize.ToString(),
+            cfg.LearningRate.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            cfg.TrainLabelFile,
+            cfg.EvalLabelFile,
+            cfg.DataDir,
+            cfg.EvalDataDir
+        });
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(raw))).ToLowerInvariant();
+    }
+
+    private static void SaveCheckpointWithMeta(string saveDir, SimpleDetNet model, string fileName, DetCheckpointMeta meta)
+    {
+        Directory.CreateDirectory(saveDir);
+        var path = Path.Combine(saveDir, fileName);
+        model.save(path);
+        File.WriteAllText(path + ".meta.json", JsonSerializer.Serialize(meta, new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    private static void ValidateCheckpointMetaOrThrow(string checkpointPath, DetCheckpointMeta expected)
+    {
+        var metaPath = checkpointPath + ".meta.json";
+        if (!File.Exists(metaPath))
+        {
+            return;
+        }
+
+        var meta = JsonSerializer.Deserialize<DetCheckpointMeta>(File.ReadAllText(metaPath));
+        if (meta is null)
+        {
+            throw new InvalidOperationException($"checkpoint metadata parse failed: {metaPath}");
+        }
+
+        if (!meta.ModelType.Equals(expected.ModelType, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException($"checkpoint model_type mismatch: {meta.ModelType} != {expected.ModelType}");
+        }
+
+        if (meta.InputSize != expected.InputSize)
+        {
+            throw new InvalidOperationException($"checkpoint input_size mismatch: {meta.InputSize} != {expected.InputSize}");
+        }
+
+        if (!meta.ConfigFingerprint.Equals(expected.ConfigFingerprint, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("checkpoint config fingerprint mismatch");
+        }
+    }
+
+    private static void WriteDataAudit(string saveDir, DetDataAudit trainAudit, DetDataAudit evalAudit)
+    {
+        var payload = new
+        {
+            train = trainAudit,
+            eval = evalAudit,
+            generated_at_utc = DateTime.UtcNow
+        };
+        File.WriteAllText(
+            Path.Combine(saveDir, "det_data_audit.json"),
+            JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    private static void ResetHistory(string saveDir)
+    {
+        File.WriteAllText(Path.Combine(saveDir, "det_train_history.jsonl"), string.Empty);
+    }
+
+    private static void AppendHistory(string saveDir, DetTrainHistoryEntry entry)
+    {
+        File.AppendAllText(
+            Path.Combine(saveDir, "det_train_history.jsonl"),
+            JsonSerializer.Serialize(entry) + Environment.NewLine);
     }
 }
 
@@ -215,3 +396,21 @@ internal sealed class SimpleDetNet : Module<Tensor, Tensor>
 }
 
 internal sealed record DetEvalMetrics(float Precision, float Recall, float Fscore, float Iou);
+internal sealed record DetCheckpointMeta(string ModelType, int InputSize, int Seed, bool Deterministic, string ConfigFingerprint, DateTime GeneratedAtUtc);
+internal sealed record DetTrainHistoryEntry(
+    int Epoch,
+    float TrainLoss,
+    float EvalPrecision,
+    float EvalRecall,
+    float EvalFscore,
+    float EvalIou,
+    float LearningRate,
+    double EpochTimeMs);
+internal sealed record DetTrainingResult(
+    int Epochs,
+    float BestAccuracy,
+    string SaveDir,
+    int Seed,
+    string Device,
+    string? EarlyStopReason,
+    bool NanDetected);

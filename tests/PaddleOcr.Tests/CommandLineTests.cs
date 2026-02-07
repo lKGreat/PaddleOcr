@@ -50,6 +50,15 @@ public sealed class CommandLineTests
     }
 
     [Fact]
+    public void Parse_Should_Read_Doctor_TrainDetReady_Subcommand()
+    {
+        var cmd = CommandLine.Parse(["doctor", "train-det-ready", "-c", "det.yml"]);
+        cmd.Root.Should().Be("doctor");
+        cmd.Sub.Should().Be("train-det-ready");
+        cmd.ConfigPath.Should().Be("det.yml");
+    }
+
+    [Fact]
     public void Parse_Should_Read_Benchmark_Subcommand()
     {
         var cmd = CommandLine.Parse(["benchmark", "run", "--scenario", "infer:system", "--iterations", "20"]);

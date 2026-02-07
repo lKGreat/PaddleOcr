@@ -31,3 +31,6 @@ Last updated: 2026-02-07
 - done: Published baseline benchmark report under `docs/benchmarks/` with train/e2e baseline numbers.
 - done: Added acceptance replay automation script for critical command paths (`scripts/replay-acceptance.ps1`).
 - done: Published phase handoff + risk register update (`docs/PHASE_HANDOFF_2026-02-07.md`).
+- done: Added DET training reproducibility/stability controls (`seed`, `deterministic`, `device`, `nan_guard`, `min_improve_delta`).
+- done: Added DET dataset audit and deterministic training history outputs (`det_data_audit.json`, `det_train_history.jsonl`).
+- done: Added DET training readiness doctor gate (`doctor train-det-ready`) and acceptance replay integration.

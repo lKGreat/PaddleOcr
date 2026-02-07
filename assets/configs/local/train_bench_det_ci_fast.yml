@@ -1,0 +1,42 @@
+Global:
+  epoch_num: 1
+  save_model_dir: ./output/train_bench_det_ci_fast
+  checkpoints:
+  resume_training: false
+  early_stop_patience: 0
+  seed: 1024
+  deterministic: true
+  device: cpu
+  min_improve_delta: 0.0001
+  nan_guard: true
+
+Architecture:
+  model_type: det
+
+Optimizer:
+  lr:
+    learning_rate: 0.001
+
+Train:
+  dataset:
+    data_dir: ../../samples/tiny_det
+    label_file_list:
+      - ../../samples/tiny_det/train.txt
+    invalid_sample_policy: skip
+    min_valid_samples: 1
+    transforms:
+      - ResizeTextImg:
+          size: 128
+  loader:
+    batch_size_per_card: 2
+
+Eval:
+  dataset:
+    data_dir: ../../samples/tiny_det
+    label_file_list:
+      - ../../samples/tiny_det/test.txt
+    transforms:
+      - ResizeTextImg:
+          size: 128
+  loader:
+    batch_size_per_card: 2

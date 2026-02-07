@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using PaddleOcr.Config;
 using PaddleOcr.Core.Cli;
 using PaddleOcr.Core.Errors;
+using System.Text.Json;
 
 namespace PaddleOcr.Tools;
 
@@ -189,7 +190,12 @@ public sealed class PocrApp
             return Task.FromResult(CommandResult.Ok($"doctor parity-table-kie passed (mode={mode})"));
         }
 
-        return Task.FromResult(CommandResult.Fail("doctor supports: check-models | parity-table-kie"));
+        if (string.Equals(parsed.Sub, "train-det-ready", StringComparison.OrdinalIgnoreCase))
+        {
+            return Task.FromResult(RunDoctorTrainDetReady(context));
+        }
+
+        return Task.FromResult(CommandResult.Fail("doctor supports: check-models | parity-table-kie | train-det-ready"));
     }
 
     private static void ValidateModelPath(PaddleOcr.Core.Cli.ExecutionContext context, string optionKey, string configPath, ICollection<string> errors)
@@ -239,7 +245,231 @@ public sealed class PocrApp
         }
     }
 
+    private static CommandResult RunDoctorTrainDetReady(PaddleOcr.Core.Cli.ExecutionContext context)
+    {
+        if (string.IsNullOrWhiteSpace(context.ConfigPath))
+        {
+            return CommandResult.Fail("doctor train-det-ready requires -c/--config");
+        }
+
+        var errors = new List<string>();
+        var warnings = new List<string>();
+        var modelType = GetConfigValue(context.Config, "Architecture.model_type") ?? string.Empty;
+        if (!modelType.Equals("det", StringComparison.OrdinalIgnoreCase))
+        {
+            warnings.Add($"Architecture.model_type is '{modelType}', expected 'det'");
+        }
+
+        var configDir = Path.GetDirectoryName(Path.GetFullPath(context.ConfigPath)) ?? Directory.GetCurrentDirectory();
+        var trainLabel = ResolvePath(configDir, GetFirstListItem(context.Config, "Train.dataset.label_file_list"));
+        var evalLabel = ResolvePath(configDir, GetFirstListItem(context.Config, "Eval.dataset.label_file_list"));
+        var dataDir = ResolvePath(configDir, GetConfigValue(context.Config, "Train.dataset.data_dir"));
+        var evalDataDir = ResolvePath(configDir, GetConfigValue(context.Config, "Eval.dataset.data_dir") ?? dataDir);
+        var minValidSamples = ParseInt(GetConfigValue(context.Config, "Train.dataset.min_valid_samples"), 1, 1);
+        var invalidPolicy = (GetConfigValue(context.Config, "Train.dataset.invalid_sample_policy") ?? "skip").ToLowerInvariant();
+        var detSize = ResolveDetInputSize(context.Config);
+
+        if (string.IsNullOrWhiteSpace(trainLabel) || !File.Exists(trainLabel))
+        {
+            errors.Add($"Train.dataset.label_file_list[0] not found: {trainLabel}");
+        }
+
+        if (string.IsNullOrWhiteSpace(evalLabel) || !File.Exists(evalLabel))
+        {
+            errors.Add($"Eval.dataset.label_file_list[0] not found: {evalLabel}");
+        }
+
+        if (string.IsNullOrWhiteSpace(dataDir) || !Directory.Exists(dataDir))
+        {
+            errors.Add($"Train.dataset.data_dir not found: {dataDir}");
+        }
+
+        if (string.IsNullOrWhiteSpace(evalDataDir) || !Directory.Exists(evalDataDir))
+        {
+            errors.Add($"Eval.dataset.data_dir not found: {evalDataDir}");
+        }
+
+        if (detSize <= 0)
+        {
+            errors.Add("Train.dataset.transforms.ResizeTextImg.size must be > 0");
+        }
+
+        if (errors.Count == 0)
+        {
+            var trainAudit = AuditDetLabel(trainLabel!, dataDir!);
+            var evalAudit = AuditDetLabel(evalLabel!, evalDataDir!);
+            if (trainAudit.ValidSamples < minValidSamples)
+            {
+                errors.Add($"train valid det samples {trainAudit.ValidSamples} < min_valid_samples {minValidSamples}");
+            }
+
+            if (evalAudit.ValidSamples < minValidSamples)
+            {
+                errors.Add($"eval valid det samples {evalAudit.ValidSamples} < min_valid_samples {minValidSamples}");
+            }
+
+            if (invalidPolicy == "fail" && (trainAudit.InvalidSamples > 0 || evalAudit.InvalidSamples > 0))
+            {
+                errors.Add($"invalid_sample_policy=fail but invalid lines found: train={trainAudit.InvalidSamples}, eval={evalAudit.InvalidSamples}");
+            }
+
+            if (trainAudit.InvalidSamples > 0 && invalidPolicy != "fail")
+            {
+                warnings.Add($"train invalid lines skipped: {trainAudit.InvalidSamples}");
+            }
+
+            if (evalAudit.InvalidSamples > 0 && invalidPolicy != "fail")
+            {
+                warnings.Add($"eval invalid lines skipped: {evalAudit.InvalidSamples}");
+            }
+
+            var summary = $"doctor train-det-ready passed: train_valid={trainAudit.ValidSamples}, eval_valid={evalAudit.ValidSamples}, det_size={detSize}, policy={invalidPolicy}";
+            if (errors.Count == 0)
+            {
+                return warnings.Count == 0 ? CommandResult.Ok(summary) : CommandResult.Ok(summary + "\n" + string.Join('\n', warnings.Select(x => "warn: " + x)));
+            }
+        }
+
+        return CommandResult.Fail("doctor train-det-ready failed:\n" + string.Join('\n', errors));
+    }
+
+    private static string? GetFirstListItem(IReadOnlyDictionary<string, object?> cfg, string path)
+    {
+        var value = GetConfigNode(cfg, path);
+        if (value is List<object?> list && list.Count > 0 && list[0] is not null)
+        {
+            return list[0]!.ToString();
+        }
+
+        return null;
+    }
+
+    private static int ResolveDetInputSize(IReadOnlyDictionary<string, object?> cfg)
+    {
+        var transforms = GetConfigNode(cfg, "Train.dataset.transforms");
+        if (transforms is not List<object?> ops)
+        {
+            return 0;
+        }
+
+        foreach (var op in ops)
+        {
+            if (op is not Dictionary<string, object?> d || !d.TryGetValue("ResizeTextImg", out var resizeObj))
+            {
+                continue;
+            }
+
+            if (resizeObj is Dictionary<string, object?> resizeCfg &&
+                resizeCfg.TryGetValue("size", out var sizeObj) &&
+                int.TryParse(sizeObj?.ToString(), out var size))
+            {
+                return size;
+            }
+        }
+
+        return 0;
+    }
+
+    private static string? ResolvePath(string baseDir, string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return path;
+        }
+
+        return Path.IsPathRooted(path) ? path : Path.GetFullPath(Path.Combine(baseDir, path));
+    }
+
+    private static DetLabelAudit AuditDetLabel(string labelFile, string dataDir)
+    {
+        var audit = new DetLabelAudit();
+        foreach (var line in File.ReadLines(labelFile))
+        {
+            audit.TotalLines++;
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                audit.InvalidSamples++;
+                continue;
+            }
+
+            var tab = line.IndexOf('\t');
+            if (tab <= 0 || tab >= line.Length - 1)
+            {
+                audit.InvalidSamples++;
+                continue;
+            }
+
+            var imageRel = line[..tab];
+            var json = line[(tab + 1)..];
+            var fullPath = Path.IsPathRooted(imageRel) ? imageRel : Path.GetFullPath(Path.Combine(dataDir, imageRel));
+            if (!File.Exists(fullPath) || !HasAnyValidPolygon(json))
+            {
+                audit.InvalidSamples++;
+                continue;
+            }
+
+            audit.ValidSamples++;
+        }
+
+        return audit;
+    }
+
+    private static bool HasAnyValidPolygon(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array)
+            {
+                return false;
+            }
+
+            foreach (var item in doc.RootElement.EnumerateArray())
+            {
+                if (!item.TryGetProperty("points", out var points) || points.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                var count = 0;
+                foreach (var p in points.EnumerateArray())
+                {
+                    if (p.ValueKind == JsonValueKind.Array && p.GetArrayLength() >= 2 && p[0].TryGetInt32(out _) && p[1].TryGetInt32(out _))
+                    {
+                        count++;
+                    }
+                }
+
+                if (count >= 4)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static int ParseInt(string? text, int fallback, int min)
+    {
+        if (!int.TryParse(text, out var value))
+        {
+            return fallback;
+        }
+
+        return Math.Max(min, value);
+    }
+
     private static string? GetConfigValue(IReadOnlyDictionary<string, object?> cfg, string path)
+    {
+        return GetConfigNode(cfg, path)?.ToString();
+    }
+
+    private static object? GetConfigNode(IReadOnlyDictionary<string, object?> cfg, string path)
     {
         object? cur = cfg;
         foreach (var part in path.Split('.', StringSplitOptions.RemoveEmptyEntries))
@@ -259,7 +489,7 @@ public sealed class PocrApp
             return null;
         }
 
-        return cur?.ToString();
+        return cur;
     }
 
     private PaddleOcr.Core.Cli.ExecutionContext BuildContext(ParsedCommand parsed)
@@ -287,4 +517,11 @@ public sealed class PocrApp
             parsed.Options,
             parsed.Overrides);
     }
+}
+
+internal sealed record DetLabelAudit
+{
+    public int TotalLines { get; set; }
+    public int ValidSamples { get; set; }
+    public int InvalidSamples { get; set; }
 }

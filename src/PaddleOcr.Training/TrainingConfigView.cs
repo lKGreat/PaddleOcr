@@ -21,6 +21,11 @@ internal sealed class TrainingConfigView
     public float GradClipNorm => GetFloat("Optimizer.grad_clip_norm", 0f);
     public int EarlyStopPatience => GetInt("Global.early_stop_patience", 0);
     public bool ResumeTraining => GetBool("Global.resume_training", true);
+    public int Seed => GetInt("Global.seed", 1024);
+    public bool Deterministic => GetBool("Global.deterministic", true);
+    public string Device => GetString("Global.device", "cpu").Trim().ToLowerInvariant();
+    public float MinImproveDelta => GetFloat("Global.min_improve_delta", 1e-4f);
+    public bool NanGuard => GetBool("Global.nan_guard", true);
     public string SaveModelDir => ResolvePath(GetString("Global.save_model_dir", "./output/cls"));
     public string? Checkpoints => ResolvePathOrNull(GetStringOrNull("Global.checkpoints"));
 
@@ -28,6 +33,8 @@ internal sealed class TrainingConfigView
     public string EvalLabelFile => ResolvePath(GetFirstString("Eval.dataset.label_file_list"));
     public string DataDir => ResolvePath(GetString("Train.dataset.data_dir", "."));
     public string EvalDataDir => ResolvePath(GetString("Eval.dataset.data_dir", DataDir));
+    public string InvalidSamplePolicy => GetString("Train.dataset.invalid_sample_policy", "skip").Trim().ToLowerInvariant();
+    public int MinValidSamples => GetInt("Train.dataset.min_valid_samples", 1);
 
     public (int C, int H, int W) ImageShape => ParseImageShape();
     public int DetInputSize => GetInt("Train.dataset.transforms.ResizeTextImg.size", 640);

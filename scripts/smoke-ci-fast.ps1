@@ -7,6 +7,7 @@ $ErrorActionPreference = "Stop"
 
 $tableCfg = "assets/configs/local/table_ci_fast.yml"
 $kieCfg = "assets/configs/local/kie_ci_fast.yml"
+$detTrainCfg = "assets/configs/local/train_bench_det_ci_fast.yml"
 
 function Invoke-Checked([string[]]$CmdArgs) {
     dotnet run --project $Project -c Release -- @CmdArgs
@@ -26,5 +27,8 @@ Invoke-Checked @("doctor", "check-models", "-c", $tableCfg)
 
 Write-Host "[smoke] doctor check-models (kie)"
 Invoke-Checked @("doctor", "check-models", "-c", $kieCfg)
+
+Write-Host "[smoke] doctor train-det-ready"
+Invoke-Checked @("doctor", "train-det-ready", "-c", $detTrainCfg)
 
 Write-Host "[smoke] done"

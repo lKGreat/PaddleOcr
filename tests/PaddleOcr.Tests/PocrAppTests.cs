@@ -302,4 +302,90 @@ public sealed class PocrAppTests
         var code = await app.RunAsync(["doctor", "parity-table-kie", "-c", cfg, "--mode", "all"]);
         code.Should().Be(0);
     }
+
+    [Fact]
+    public async Task RunAsync_DoctorTrainDetReady_Should_Fail_Without_Config()
+    {
+        var app = new PocrApp(
+            NullLogger.Instance,
+            new ConfigLoader(),
+            new ProbeExecutor("training"),
+            new ProbeExecutor("inference"),
+            new ProbeExecutor("export"),
+            new ProbeExecutor("service"),
+            new ProbeExecutor("e2e"),
+            new ProbeExecutor("benchmark"),
+            new ProbeExecutor("plugin"));
+
+        var code = await app.RunAsync(["doctor", "train-det-ready"]);
+        code.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task RunAsync_DoctorTrainDetReady_Should_Pass_For_TinyDet_Config()
+    {
+        var root = FindRepoRoot();
+        var samples = Path.Combine(root, "assets", "samples", "tiny_det");
+        var trainLabel = Path.Combine(samples, "train.txt");
+        var evalLabel = Path.Combine(samples, "test.txt");
+
+        var dir = Path.Combine(Path.GetTempPath(), "pocr_det_ready_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var cfg = Path.Combine(dir, "det_ready.yml");
+        await File.WriteAllTextAsync(cfg,
+            $$"""
+              Global:
+                save_model_dir: {{dir.Replace("\\", "/")}}/out
+              Architecture:
+                model_type: det
+              Train:
+                dataset:
+                  data_dir: {{samples.Replace("\\", "/")}}
+                  label_file_list:
+                    - {{trainLabel.Replace("\\", "/")}}
+                  invalid_sample_policy: skip
+                  min_valid_samples: 1
+                  transforms:
+                    - ResizeTextImg:
+                        size: 128
+              Eval:
+                dataset:
+                  data_dir: {{samples.Replace("\\", "/")}}
+                  label_file_list:
+                    - {{evalLabel.Replace("\\", "/")}}
+                  transforms:
+                    - ResizeTextImg:
+                        size: 128
+              """);
+
+        var app = new PocrApp(
+            NullLogger.Instance,
+            new ConfigLoader(),
+            new ProbeExecutor("training"),
+            new ProbeExecutor("inference"),
+            new ProbeExecutor("export"),
+            new ProbeExecutor("service"),
+            new ProbeExecutor("e2e"),
+            new ProbeExecutor("benchmark"),
+            new ProbeExecutor("plugin"));
+
+        var code = await app.RunAsync(["doctor", "train-det-ready", "-c", cfg]);
+        code.Should().Be(0);
+    }
+
+    private static string FindRepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null)
+        {
+            if (File.Exists(Path.Combine(dir.FullName, "PaddleOcr.slnx")))
+            {
+                return dir.FullName;
+            }
+
+            dir = dir.Parent;
+        }
+
+        throw new InvalidOperationException("repo root not found");
+    }
 }
