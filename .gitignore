@@ -1,0 +1,55 @@
+# Build artifacts
+bin/
+obj/
+out/
+TestResults/
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+*.cache
+*.ncrunch*
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# Logs
+*.log
+logs/
+log_output/
+
+# Runtime outputs
+output/
+outputs/
+inference/
+inference_results/
+hubserving_result/
+debug/
+tmp/
+temp/
+
+# Model and dataset artifacts
+*.pdparams
+*.pdopt
+*.pdstates
+*.pdmodel
+*.pdiparams
+*.onnx
+*.engine
+*.trt
+*.ckpt
+*.safetensors
+*.weights
+
+# Large data folders
+train_data/
+pretrain_models/
+datasets/
+data/
+
+# Package cache
+*.nupkg
+packages/

@@ -1,0 +1,16 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\PaddleOcr.Core\PaddleOcr.Core.csproj" />
+    <ProjectReference Include="..\PaddleOcr.Config\PaddleOcr.Config.csproj" />
+    <ProjectReference Include="..\PaddleOcr.Data\PaddleOcr.Data.csproj" />
+    <ProjectReference Include="..\PaddleOcr.Models\PaddleOcr.Models.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>
