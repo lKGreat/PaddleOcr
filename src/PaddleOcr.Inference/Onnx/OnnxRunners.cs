@@ -320,6 +320,7 @@ public sealed class RecOnnxRunner
         // 解析图像形状
         var (targetC, targetH, targetW) = ParseImageShape(options.RecImageShape, options.RecAlgorithm);
         var batchSize = Math.Max(1, options.RecBatchNum);
+        var inputName = rec.InputMetadata.First().Key;
 
         var lines = new List<string>(imageFiles.Count);
 
@@ -327,37 +328,139 @@ public sealed class RecOnnxRunner
         for (var batchStart = 0; batchStart < imageFiles.Count; batchStart += batchSize)
         {
             var batchEnd = Math.Min(batchStart + batchSize, imageFiles.Count);
-            for (var i = batchStart; i < batchEnd; i++)
+            var currentBatchSize = batchEnd - batchStart;
+
+            // 预处理批次中的所有图像
+            var batchPreResults = new Rec.RecPreprocessResult[currentBatchSize];
+            for (var i = 0; i < currentBatchSize; i++)
             {
-                var file = imageFiles[i];
-                using var img = Image.Load<Rgb24>(file);
+                using var img = Image.Load<Rgb24>(imageFiles[batchStart + i]);
+                batchPreResults[i] = preprocessor.Process(img, targetC, targetH, targetW);
+            }
 
-                // 使用算法特定的预处理器
-                var preResult = preprocessor.Process(img, targetC, targetH, targetW);
+            // 检查模型是否接受 valid_ratio 额外输入
+            var hasValidRatioInput = rec.InputMetadata.ContainsKey("valid_ratio");
 
-                // 运行 ONNX 推理
-                var tensor = new Microsoft.ML.OnnxRuntime.Tensors.DenseTensor<float>(
-                    preResult.Data,
-                    preResult.Dims);
-                var inputName = rec.InputMetadata.First().Key;
-                var inputs = new List<NamedOnnxValue>
+            if (currentBatchSize == 1)
+            {
+                // 单图像：直接推理
+                var preResult = batchPreResults[0];
+                var tensor = new DenseTensor<float>(preResult.Data, preResult.Dims);
+                var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(inputName, tensor) };
+
+                if (hasValidRatioInput)
                 {
-                    NamedOnnxValue.CreateFromTensor(inputName, tensor)
-                };
+                    var vrData = new float[] { preResult.ValidRatio };
+                    var vrTensor = new DenseTensor<float>(vrData, new[] { 1 });
+                    inputs.Add(NamedOnnxValue.CreateFromTensor("valid_ratio", vrTensor));
+                }
+
                 using var outputs = rec.Run(inputs);
                 var outTensor = outputs.First().AsTensor<float>();
-                var outData = outTensor.ToArray();
-                var outDims = outTensor.Dimensions.ToArray();
+                var recRes = recPost(outTensor.ToArray(), outTensor.Dimensions.ToArray(), charset);
+                AppendResult(lines, imageFiles[batchStart], recRes, options.DropScore);
+            }
+            else
+            {
+                // 多图像：合并为 batch tensor 一次推理
+                // 所有预处理结果的 channel 和 height 相同，width 也相同（已 pad 到 targetW）
+                var channels = batchPreResults[0].Dims.Length >= 4 ? batchPreResults[0].Dims[1] : targetC;
+                var singleSize = channels * targetH * targetW;
+                var batchData = new float[currentBatchSize * singleSize];
 
-                var recRes = recPost(outData, outDims, charset);
-                var payload = recRes.Score >= options.DropScore
-                    ? new[] { new { text = recRes.Text, score = recRes.Score } }
-                    : Array.Empty<object>();
-                lines.Add($"{Path.GetFileName(file)}\t{JsonSerializer.Serialize(payload)}");
+                for (var i = 0; i < currentBatchSize; i++)
+                {
+                    var src = batchPreResults[i].Data;
+                    Array.Copy(src, 0, batchData, i * singleSize, Math.Min(src.Length, singleSize));
+                }
+
+                var batchDims = new[] { currentBatchSize, channels, targetH, targetW };
+                var batchTensor = new DenseTensor<float>(batchData, batchDims);
+                var batchInputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(inputName, batchTensor) };
+
+                // 如果模型支持动态 batch，一次推理整个 batch
+                try
+                {
+                    using var batchOutputs = rec.Run(batchInputs);
+                    var batchOutTensor = batchOutputs.First().AsTensor<float>();
+                    var batchOutDims = batchOutTensor.Dimensions.ToArray();
+                    var batchOutData = batchOutTensor.ToArray();
+
+                    // 按样本拆分输出
+                    if (batchOutDims.Length >= 2 && batchOutDims[0] == currentBatchSize)
+                    {
+                        var perSampleSize = batchOutData.Length / currentBatchSize;
+                        var singleOutDims = new int[batchOutDims.Length];
+                        Array.Copy(batchOutDims, singleOutDims, batchOutDims.Length);
+                        singleOutDims[0] = 1;
+
+                        for (var i = 0; i < currentBatchSize; i++)
+                        {
+                            var sampleData = new float[perSampleSize];
+                            Array.Copy(batchOutData, i * perSampleSize, sampleData, 0, perSampleSize);
+                            var recRes = recPost(sampleData, singleOutDims, charset);
+                            AppendResult(lines, imageFiles[batchStart + i], recRes, options.DropScore);
+                        }
+                    }
+                    else
+                    {
+                        // 如果输出维度不匹配，回退到逐个解码
+                        FallbackSingleInference(rec, inputName, batchPreResults, imageFiles, batchStart, currentBatchSize, recPost, charset, options.DropScore, lines);
+                    }
+                }
+                catch
+                {
+                    // 如果模型不支持动态 batch，回退到逐个推理
+                    FallbackSingleInference(rec, inputName, batchPreResults, imageFiles, batchStart, currentBatchSize, recPost, charset, options.DropScore, lines);
+                }
             }
         }
 
         File.WriteAllLines(Path.Combine(options.OutputDir, "rec_results.txt"), lines);
+    }
+
+    private static void FallbackSingleInference(
+        InferenceSession rec,
+        string inputName,
+        Rec.RecPreprocessResult[] preResults,
+        IReadOnlyList<string> imageFiles,
+        int batchStart,
+        int count,
+        Func<float[], int[], IReadOnlyList<string>, Models.RecResult> recPost,
+        IReadOnlyList<string> charset,
+        float dropScore,
+        List<string> lines)
+    {
+        // 检查模型是否接受 valid_ratio 额外输入（SAR/RobustScanner/SATRN 等算法需要）
+        var hasValidRatioInput = rec.InputMetadata.ContainsKey("valid_ratio");
+
+        for (var i = 0; i < count; i++)
+        {
+            var preResult = preResults[i];
+            var tensor = new DenseTensor<float>(preResult.Data, preResult.Dims);
+            var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(inputName, tensor) };
+
+            // 如果模型有 valid_ratio 输入，传递预处理结果中的 ValidRatio
+            if (hasValidRatioInput)
+            {
+                var vrData = new float[] { preResult.ValidRatio };
+                var vrTensor = new DenseTensor<float>(vrData, new[] { 1 });
+                inputs.Add(NamedOnnxValue.CreateFromTensor("valid_ratio", vrTensor));
+            }
+
+            using var outputs = rec.Run(inputs);
+            var outTensor = outputs.First().AsTensor<float>();
+            var recRes = recPost(outTensor.ToArray(), outTensor.Dimensions.ToArray(), charset);
+            AppendResult(lines, imageFiles[batchStart + i], recRes, dropScore);
+        }
+    }
+
+    private static void AppendResult(List<string> lines, string filePath, Models.RecResult recRes, float dropScore)
+    {
+        var payload = recRes.Score >= dropScore
+            ? new[] { new { text = recRes.Text, score = recRes.Score } }
+            : Array.Empty<object>();
+        lines.Add($"{Path.GetFileName(filePath)}\t{JsonSerializer.Serialize(payload)}");
     }
 
     private static (int C, int H, int W) ParseImageShape(string shape, RecAlgorithm algorithm)

@@ -49,6 +49,27 @@ public abstract class RecDecoderBase : IRecPostprocessor
     }
 
     /// <summary>
+    /// 判断字符串是否仅由字母、数字或 CJK 字符组成。
+    /// </summary>
+    protected static bool IsAlphanumericOrChinese(string s)
+    {
+        if (string.IsNullOrEmpty(s))
+        {
+            return false;
+        }
+
+        foreach (var c in s)
+        {
+            if (!char.IsLetterOrDigit(c) && !(c >= '\u4e00' && c <= '\u9fff'))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// 在 logits 的指定 time step 上做 argmax，返回 (index, maxProb)。
     /// </summary>
     protected static (int Index, float Prob) ArgmaxWithProb(float[] logits, int offset, int classes)

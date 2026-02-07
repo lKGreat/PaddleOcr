@@ -55,8 +55,8 @@ public sealed class LaTeXOcrPreprocessor : IRecPreprocessor
                     }
                     else
                     {
-                        // padding 填充白色（归一化后）
-                        data[idx] = (1f - mean[c]) / std[c];
+                        // padding 填充零值（归一化后的 0 对应原始的 mean 值）
+                        data[idx] = (0f - mean[c]) / std[c];
                     }
                 }
             }

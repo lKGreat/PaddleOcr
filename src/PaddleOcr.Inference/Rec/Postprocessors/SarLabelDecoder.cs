@@ -63,22 +63,4 @@ public sealed class SarLabelDecoder : RecDecoderBase
 
         return BuildResult(textChars, scores);
     }
-
-    private static bool IsAlphanumericOrChinese(string s)
-    {
-        if (string.IsNullOrEmpty(s))
-        {
-            return false;
-        }
-
-        foreach (var c in s)
-        {
-            if (char.IsLetterOrDigit(c) || (c >= 0x4E00 && c <= 0x9FFF))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
 }

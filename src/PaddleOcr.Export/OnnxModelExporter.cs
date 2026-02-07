@@ -7,7 +7,8 @@ using static TorchSharp.torch;
 namespace PaddleOcr.Export;
 
 /// <summary>
-/// OnnxModelExporter：从 TorchSharp 训练模型直接导出 ONNX。
+/// OnnxModelExporter：从 TorchSharp 训练模型导出推理模型（纯 C# 实现，不依赖 Python）。
+/// 导出 TorchScript 格式 (.pt)，同时生成包含输入输出元数据的 manifest。
 /// </summary>
 public sealed class OnnxModelExporter
 {
@@ -19,53 +20,58 @@ public sealed class OnnxModelExporter
     }
 
     /// <summary>
-    /// 从 TorchSharp 模型导出 ONNX。
+    /// 从 TorchSharp 模型导出推理模型。
+    /// 使用 TorchScript 格式保存，通过前向传播记录输入输出张量元数据。
     /// </summary>
-    public string ExportOnnx(
+    /// <returns>导出结果，包含模型路径和输入输出元数据。</returns>
+    public ExportResult Export(
         RecModel model,
-        string outputPath,
+        string outputDir,
         int batchSize = 1,
         int channels = 3,
         int height = 48,
         int width = 320,
-        bool dynamicBatch = false,
-        bool dynamicSequence = false)
+        bool dynamicBatch = false)
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(outputPath) ?? Directory.GetCurrentDirectory());
+        Directory.CreateDirectory(outputDir);
 
         model.eval();
         using var noGrad = torch.no_grad();
 
-        // 创建示例输入
-        var inputShape = dynamicBatch
-            ? new long[] { -1, channels, height, width }
-            : new long[] { batchSize, channels, height, width };
+        // 使用实际 batchSize 创建示例输入，前向传播获取输出形状
+        using var dummyInput = torch.randn(batchSize, channels, height, width, dtype: ScalarType.Float32);
+        using var output = model.forward(dummyInput);
+        var outputShape = output.shape.Select(s => (int)s).ToArray();
 
-        using var dummyInput = torch.randn(inputShape, dtype: ScalarType.Float32);
+        // 保存 TorchScript 模型
+        var modelFileName = "inference.pt";
+        var modelPath = Path.Combine(outputDir, modelFileName);
+        model.save(modelPath);
+        _logger.LogInformation("Exported TorchScript model: {Path}", modelPath);
 
-        try
-        {
-            // 导出 ONNX（TorchSharp 的 ONNX 导出 API）
-            // 注意：TorchSharp 的 ONNX 导出功能可能有限
-            // 这里使用简化实现，实际使用时需要根据 TorchSharp 版本调整
-            // 暂时保存为 TorchScript 格式，需要手动转换为 ONNX
-            model.save(outputPath.Replace(".onnx", ".pt"));
+        // 构建输入输出元数据
+        var inputDims = dynamicBatch
+            ? new[] { -1, channels, height, width }
+            : new[] { batchSize, channels, height, width };
+        var outputDims = dynamicBatch
+            ? new[] { -1 }.Concat(outputShape.Skip(1)).ToArray()
+            : outputShape;
 
-            _logger.LogWarning("ONNX export not fully supported. Saved TorchScript model to {Path}. Manual conversion to ONNX may be required.", outputPath.Replace(".onnx", ".pt"));
-            _logger.LogInformation("Exported model (TorchScript): {Path}", outputPath.Replace(".onnx", ".pt"));
-            return outputPath.Replace(".onnx", ".pt");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to export ONNX model");
-            throw;
-        }
+        var inputs = new List<ExportTensorInfo> { new("input", inputDims) };
+        var outputs = new List<ExportTensorInfo> { new("output", outputDims) };
+
+        _logger.LogInformation(
+            "Model input: [{InputShape}], output: [{OutputShape}]",
+            string.Join(", ", inputDims),
+            string.Join(", ", outputDims));
+
+        return new ExportResult(modelPath, modelFileName, inputs, outputs);
     }
 
     /// <summary>
-    /// 从配置导出 ONNX。
+    /// 从配置导出推理模型。
     /// </summary>
-    public string ExportOnnxFromConfig(ExportConfigView cfg)
+    public string ExportFromConfig(ExportConfigView cfg)
     {
         Directory.CreateDirectory(cfg.SaveInferenceDir);
 
@@ -76,7 +82,7 @@ public sealed class OnnxModelExporter
             throw new FileNotFoundException($"checkpoint not found: {ckpt}");
         }
 
-        // 构建模型（需要从配置读取架构信息）
+        // 构建模型（从配置读取架构信息）
         var numClasses = EstimateNumClasses(cfg);
         var model = BuildModelFromConfig(cfg, numClasses);
         model.load(ckpt);
@@ -87,22 +93,33 @@ public sealed class OnnxModelExporter
         // 解析图像尺寸
         var (c, h, w) = ParseImageShape(cfg);
 
-        var outputPath = Path.Combine(cfg.SaveInferenceDir, "inference.onnx");
-        ExportOnnx(model, outputPath, batchSize: 1, channels: c, height: h, width: w, dynamicBatch: true, dynamicSequence: true);
+        var result = Export(model, cfg.SaveInferenceDir, batchSize: 1, channels: c, height: h, width: w, dynamicBatch: true);
+
+        // 如果已有 ONNX 文件，尝试读取其元数据；否则使用前向传播得到的元数据
+        var onnxPath = Path.Combine(cfg.SaveInferenceDir, "inference.onnx");
+        var (manifestInputs, manifestOutputs) = File.Exists(onnxPath)
+            ? ReadOnnxIoMetadata(onnxPath)
+            : (result.Inputs, result.Outputs);
 
         // 生成 manifest
-        var io = GetOnnxIoMetadata(outputPath);
-        var manifest = BuildManifest(cfg, "onnx", DateTime.UtcNow, "inference.onnx", ckpt, null, null, io.Inputs, io.Outputs);
+        var manifest = BuildManifest(cfg, "torchscript", DateTime.UtcNow, result.ModelFileName, ckpt, null, null, manifestInputs, manifestOutputs);
         WriteManifest(cfg.SaveInferenceDir, manifest);
         ValidateManifestOrThrow(cfg.SaveInferenceDir);
 
+        // 复制字典文件到推理目录
+        CopyDictIfNeeded(cfg);
+
         model.Dispose();
-        return outputPath;
+        return result.ModelPath;
     }
+
+    /// <summary>
+    /// 向后兼容的旧入口（内部重定向到 ExportFromConfig）。
+    /// </summary>
+    public string ExportOnnxFromConfig(ExportConfigView cfg) => ExportFromConfig(cfg);
 
     private RecModel BuildModelFromConfig(ExportConfigView cfg, int numClasses)
     {
-        // 从配置读取架构信息
         var backboneName = GetConfigString(cfg, "Architecture.Backbone.name", "MobileNetV1Enhance");
         var neckName = GetConfigString(cfg, "Architecture.Neck.name", "SequenceEncoder");
         var headName = GetConfigString(cfg, "Architecture.Head.name", "CTCHead");
@@ -115,20 +132,17 @@ public sealed class OnnxModelExporter
 
     private int EstimateNumClasses(ExportConfigView cfg)
     {
-        // 从字典文件估算类别数
         if (!string.IsNullOrWhiteSpace(cfg.RecCharDictPath) && File.Exists(cfg.RecCharDictPath))
         {
             var lines = File.ReadAllLines(cfg.RecCharDictPath);
             return lines.Length + 1; // +1 for blank/PAD
         }
 
-        // 默认值
-        return 6625; // 常见的中文字典大小
+        return 6625;
     }
 
     private (int C, int H, int W) ParseImageShape(ExportConfigView cfg)
     {
-        // 尝试从配置读取图像尺寸
         var shape = GetConfigIntList(cfg, "Train.dataset.transforms", "RecResizeImg", "image_shape");
         if (shape.Count >= 3)
         {
@@ -138,20 +152,42 @@ public sealed class OnnxModelExporter
         return (3, 48, 320);
     }
 
-    private string GetConfigString(ExportConfigView cfg, string path, string fallback)
+    private static string GetConfigString(ExportConfigView cfg, string path, string fallback)
     {
-        // 简化实现：从配置根字典读取
-        return fallback; // TODO: 实现配置读取
+        return cfg.GetByPathPublic(path)?.ToString() ?? fallback;
     }
 
-    private int GetConfigInt(ExportConfigView cfg, string path, int fallback)
+    private static int GetConfigInt(ExportConfigView cfg, string path, int fallback)
     {
-        return fallback; // TODO: 实现配置读取
+        var raw = cfg.GetByPathPublic(path);
+        if (raw is null)
+        {
+            return fallback;
+        }
+
+        return int.TryParse(raw.ToString(), out var v) ? v : fallback;
     }
 
-    private List<int> GetConfigIntList(ExportConfigView cfg, string transformsPath, string opName, string field)
+    private static List<int> GetConfigIntList(ExportConfigView cfg, string transformsPath, string opName, string field)
     {
-        return [3, 48, 320]; // TODO: 实现配置读取
+        var transforms = cfg.GetByPathPublic(transformsPath);
+        if (transforms is List<object?> list)
+        {
+            foreach (var item in list)
+            {
+                if (item is Dictionary<string, object?> op && op.TryGetValue(opName, out var cfgObj) &&
+                    cfgObj is Dictionary<string, object?> opCfg && opCfg.TryGetValue(field, out var fieldObj) &&
+                    fieldObj is List<object?> fieldList)
+                {
+                    return fieldList
+                        .Where(x => x is not null)
+                        .Select(x => int.TryParse(x!.ToString(), out var v) ? v : 0)
+                        .ToList();
+                }
+            }
+        }
+
+        return [3, 48, 320];
     }
 
     private static string ResolveCheckpoint(ExportConfigView cfg)
@@ -176,7 +212,7 @@ public sealed class OnnxModelExporter
         return best;
     }
 
-    private static (IReadOnlyList<ExportTensorInfo> Inputs, IReadOnlyList<ExportTensorInfo> Outputs) GetOnnxIoMetadata(string onnxPath)
+    private static (IReadOnlyList<ExportTensorInfo> Inputs, IReadOnlyList<ExportTensorInfo> Outputs) ReadOnnxIoMetadata(string onnxPath)
     {
         using var session = new Microsoft.ML.OnnxRuntime.InferenceSession(onnxPath);
         var inputs = session.InputMetadata
@@ -186,6 +222,21 @@ public sealed class OnnxModelExporter
             .Select(kv => new ExportTensorInfo(kv.Key, kv.Value.Dimensions.ToArray()))
             .ToList();
         return (inputs, outputs);
+    }
+
+    private void CopyDictIfNeeded(ExportConfigView cfg)
+    {
+        if (string.IsNullOrWhiteSpace(cfg.RecCharDictPath) || !File.Exists(cfg.RecCharDictPath))
+        {
+            return;
+        }
+
+        var dest = Path.Combine(cfg.SaveInferenceDir, Path.GetFileName(cfg.RecCharDictPath));
+        if (!File.Exists(dest))
+        {
+            File.Copy(cfg.RecCharDictPath, dest);
+            _logger.LogInformation("Copied dict to {Path}", dest);
+        }
     }
 
     private static ExportManifest BuildManifest(
@@ -240,9 +291,18 @@ public sealed class OnnxModelExporter
                 throw new InvalidOperationException("manifest parse failed");
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not InvalidOperationException)
         {
             throw new InvalidOperationException($"manifest validation failed: {ex.Message}");
         }
     }
 }
+
+/// <summary>
+/// 模型导出结果。
+/// </summary>
+public sealed record ExportResult(
+    string ModelPath,
+    string ModelFileName,
+    IReadOnlyList<ExportTensorInfo> Inputs,
+    IReadOnlyList<ExportTensorInfo> Outputs);

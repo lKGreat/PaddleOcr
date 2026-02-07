@@ -133,38 +133,67 @@ public sealed class CenterExporter
 
     private float[][] ExtractFeatures(RecModel model, Tensor input)
     {
-        // 简化实现：从模型的中间层提取特征
-        // 实际实现需要根据具体模型架构调整
         var predictions = model.ForwardDict(input);
+
+        // 优先使用 "features" 键（如果模型 head 显式输出特征）
         if (predictions.TryGetValue("features", out var features))
         {
-            var featData = features.cpu().data<float>().ToArray();
-            var batchSize = input.shape[0];
-            var featDim = featData.Length / batchSize;
-            var result = new float[batchSize][];
-            for (var i = 0; i < batchSize; i++)
+            return TensorToBatchedVectors(features, input.shape[0]);
+        }
+
+        // 尝试使用 "predict" 之前的中间表示
+        // 对于 CTC 类型的 head，predict 是 [B, T, V]，取时间维度平均得到 [B, V] 作为全局特征
+        if (predictions.TryGetValue("predict", out var logits))
+        {
+            // [B, T, V] -> 对 T 维做平均 -> [B, V]（全局语义特征向量）
+            if (logits.dim() == 3)
             {
-                result[i] = new float[featDim];
-                Array.Copy(featData, i * featDim, result[i], 0, featDim);
+                using var avgOverTime = logits.mean(new long[] { 1 }, keepdim: false);
+                return TensorToBatchedVectors(avgOverTime, input.shape[0]);
             }
 
-            return result;
+            // [B, V] 已是二维
+            if (logits.dim() == 2)
+            {
+                return TensorToBatchedVectors(logits, input.shape[0]);
+            }
         }
 
-        // 回退：使用预测输出的平均值
-        var logits = predictions["predict"];
-        using var avg = logits.mean(new long[] { 1 }, keepdim: false); // [B, T, V] -> [B, V]
-        var avgData = avg.cpu().data<float>().ToArray();
-        var inputBatchSize = input.shape[0];
-        var vocabSize = avgData.Length / inputBatchSize;
-        var fallback = new float[inputBatchSize][];
-        for (var i = 0; i < inputBatchSize; i++)
+        // 如果有 "visual" 输出（VisionLAN 等），使用它
+        if (predictions.TryGetValue("visual", out var visual))
         {
-            fallback[i] = new float[vocabSize];
-            Array.Copy(avgData, i * vocabSize, fallback[i], 0, vocabSize);
+            if (visual.dim() == 3)
+            {
+                using var avgVisual = visual.mean(new long[] { 1 }, keepdim: false);
+                return TensorToBatchedVectors(avgVisual, input.shape[0]);
+            }
+
+            return TensorToBatchedVectors(visual, input.shape[0]);
         }
 
-        return fallback;
+        // 最终回退：取第一个输出
+        var firstOutput = predictions.Values.First();
+        if (firstOutput.dim() == 3)
+        {
+            using var avg = firstOutput.mean(new long[] { 1 }, keepdim: false);
+            return TensorToBatchedVectors(avg, input.shape[0]);
+        }
+
+        return TensorToBatchedVectors(firstOutput, input.shape[0]);
+    }
+
+    private static float[][] TensorToBatchedVectors(Tensor tensor, long batchSize)
+    {
+        var data = tensor.cpu().data<float>().ToArray();
+        var featDim = (int)(data.Length / batchSize);
+        var result = new float[batchSize][];
+        for (var i = 0; i < batchSize; i++)
+        {
+            result[i] = new float[featDim];
+            Array.Copy(data, i * featDim, result[i], 0, featDim);
+        }
+
+        return result;
     }
 }
 

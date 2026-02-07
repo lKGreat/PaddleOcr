@@ -191,8 +191,41 @@ public static class RecMetrics
 
     private static List<string> Tokenize(string text)
     {
-        // 简化：按字符分词
-        return text.Select(c => c.ToString()).ToList();
+        // Unicode 感知分词：
+        // - 连续的拉丁字母/数字作为一个 token
+        // - CJK 等非拉丁字符每个作为一个 token
+        // - 忽略空白
+        var tokens = new List<string>();
+        var i = 0;
+        while (i < text.Length)
+        {
+            var ch = text[i];
+            if (char.IsWhiteSpace(ch))
+            {
+                i++;
+                continue;
+            }
+
+            if (char.IsLetterOrDigit(ch) && ch < 0x3000)
+            {
+                // 拉丁/数字：连续收集
+                var start = i;
+                while (i < text.Length && char.IsLetterOrDigit(text[i]) && text[i] < 0x3000)
+                {
+                    i++;
+                }
+
+                tokens.Add(text[start..i]);
+            }
+            else
+            {
+                // CJK 或其他非拉丁字符：逐个 token
+                tokens.Add(ch.ToString());
+                i++;
+            }
+        }
+
+        return tokens;
     }
 
     private static List<string> GetNgrams(List<string> tokens, int n)
@@ -281,7 +314,7 @@ public static class RecMetrics
 
     private static List<(char Ref, char Pred)> AlignSequences(string reference, string prediction)
     {
-        // 使用动态规划对齐序列
+        // Needleman-Wunsch 全局序列对齐算法
         var n = reference.Length;
         var m = prediction.Length;
         var alignment = new List<(char, char)>();
@@ -311,16 +344,58 @@ public static class RecMetrics
             return alignment;
         }
 
-        // 简化的对齐：逐字符匹配
-        var maxLen = Math.Max(n, m);
-        for (var i = 0; i < maxLen; i++)
+        // DP 表: score[i, j] = 对齐 reference[0..i-1] 和 prediction[0..j-1] 的最优分数
+        const int matchScore = 1;
+        const int mismatchPenalty = -1;
+        const int gapPenalty = -1;
+
+        var score = new int[n + 1, m + 1];
+        for (var i = 0; i <= n; i++) score[i, 0] = i * gapPenalty;
+        for (var j = 0; j <= m; j++) score[0, j] = j * gapPenalty;
+
+        for (var i = 1; i <= n; i++)
         {
-            var r = i < n ? reference[i] : '\0';
-            var p = i < m ? prediction[i] : '\0';
-            alignment.Add((r, p));
+            for (var j = 1; j <= m; j++)
+            {
+                var diagScore = score[i - 1, j - 1] + (reference[i - 1] == prediction[j - 1] ? matchScore : mismatchPenalty);
+                var upScore = score[i - 1, j] + gapPenalty;
+                var leftScore = score[i, j - 1] + gapPenalty;
+                score[i, j] = Math.Max(diagScore, Math.Max(upScore, leftScore));
+            }
         }
 
-        return alignment;
+        // 回溯获取对齐
+        var aligned = new List<(char, char)>();
+        var ci = n;
+        var cj = m;
+        while (ci > 0 || cj > 0)
+        {
+            if (ci > 0 && cj > 0)
+            {
+                var diagScore = score[ci - 1, cj - 1] + (reference[ci - 1] == prediction[cj - 1] ? matchScore : mismatchPenalty);
+                if (score[ci, cj] == diagScore)
+                {
+                    aligned.Add((reference[ci - 1], prediction[cj - 1]));
+                    ci--;
+                    cj--;
+                    continue;
+                }
+            }
+
+            if (ci > 0 && score[ci, cj] == score[ci - 1, cj] + gapPenalty)
+            {
+                aligned.Add((reference[ci - 1], '\0'));
+                ci--;
+            }
+            else
+            {
+                aligned.Add(('\0', prediction[cj - 1]));
+                cj--;
+            }
+        }
+
+        aligned.Reverse();
+        return aligned;
     }
 }
 

@@ -5,7 +5,7 @@ using SixLabors.ImageSharp.Processing;
 
 namespace PaddleOcr.Training;
 
-internal sealed class SimpleRecDataset
+public sealed class SimpleRecDataset
 {
     private readonly List<(string ImagePath, string Text)> _samples;
     private readonly int _height;

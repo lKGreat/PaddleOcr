@@ -40,11 +40,15 @@ public sealed class NRTRLoss : IRecLoss
         // Apply mask
         loss = (loss * mask).sum() / (mask.sum() + 1e-8f);
 
-        // Label smoothing (简化实现)
+        // Label smoothing：对非 padding 位置应用标准 label smoothing
+        // 参考: https://arxiv.org/abs/1512.00567
         if (_labelSmoothing > 0.0f)
         {
-            var smoothLoss = -functional.log_softmax(logits, dim: -1).mean();
-            loss = (1.0f - _labelSmoothing) * loss + _labelSmoothing * (smoothLoss * mask).sum() / (mask.sum() + 1e-8f);
+            using var logProbs = functional.log_softmax(logits, dim: -1); // [B*T, C]
+            // 均匀分布的交叉熵 = -mean(log_softmax)（对每个时间步）
+            using var uniformLoss = -logProbs.mean(new long[] { -1 }); // [B*T]
+            var maskedUniformLoss = (uniformLoss * mask).sum() / (mask.sum() + 1e-8f);
+            loss = (1.0f - _labelSmoothing) * loss + _labelSmoothing * maskedUniformLoss;
         }
 
         return new Dictionary<string, Tensor> { ["loss"] = loss };

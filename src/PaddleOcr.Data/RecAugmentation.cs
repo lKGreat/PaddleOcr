@@ -20,15 +20,36 @@ public static class RecAugmentation
     }
 
     /// <summary>
-    /// 应用随机噪声。
+    /// 应用高斯噪声。
     /// </summary>
     public static Image<Rgb24> AddNoise(Image<Rgb24> image, float noiseLevel = 0.1f)
     {
-        image.Mutate(x =>
+        var rng = Random.Shared;
+        var maxNoise = (int)(noiseLevel * 255);
+        image.Mutate(ctx =>
         {
-            // 简化实现：添加随机噪声
-            // 实际实现可能需要更复杂的噪声生成
+            // 使用 ProcessPixelRowsAsVector4 进行像素级操作
         });
+
+        // 直接在像素上添加高斯噪声
+        for (var y = 0; y < image.Height; y++)
+        {
+            for (var x = 0; x < image.Width; x++)
+            {
+                var pixel = image[x, y];
+                // Box-Muller 近似高斯噪声
+                var u1 = rng.NextSingle();
+                var u2 = rng.NextSingle();
+                var gaussianNoise = MathF.Sqrt(-2f * MathF.Log(Math.Max(u1, 1e-10f))) * MathF.Cos(2f * MathF.PI * u2);
+                var noise = (int)(gaussianNoise * maxNoise);
+
+                var r = Math.Clamp(pixel.R + noise, 0, 255);
+                var g = Math.Clamp(pixel.G + noise, 0, 255);
+                var b = Math.Clamp(pixel.B + noise, 0, 255);
+                image[x, y] = new Rgb24((byte)r, (byte)g, (byte)b);
+            }
+        }
+
         return image;
     }
 

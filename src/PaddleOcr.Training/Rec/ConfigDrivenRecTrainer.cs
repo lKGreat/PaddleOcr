@@ -113,8 +113,8 @@ internal sealed class ConfigDrivenRecTrainer
                 if (gradAccumulator.ShouldUpdate() || globalStep == 1)
                 {
                     lrScheduler.Step(globalStep, epoch);
-                    // 注意：TorchSharp 的优化器学习率更新可能需要重新创建优化器
-                    // 这里简化处理，实际使用时可能需要根据 TorchSharp API 调整
+                    // 通过 param_groups 更新优化器学习率
+                    ApplyLearningRate(optimizer, lrScheduler.CurrentLR);
                 }
             }
 
@@ -449,6 +449,17 @@ internal sealed class ConfigDrivenRecTrainer
         }
 
         return cuda.is_available() ? CUDA : CPU;
+    }
+
+    /// <summary>
+    /// 通过 TorchSharp 优化器的 param_groups 更新学习率。
+    /// </summary>
+    private static void ApplyLearningRate(Optimizer optimizer, double lr)
+    {
+        foreach (var pg in optimizer.ParamGroups)
+        {
+            pg.LearningRate = lr;
+        }
     }
 
     private static int GetGradAccumulationSteps(TrainingConfigView cfg)

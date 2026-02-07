@@ -46,11 +46,13 @@ public sealed class CanRecPreprocessor : IRecPreprocessor
                         gray = 1f - gray;
                     }
 
-                    data[y * targetW + x] = gray;
+                    // 归一化到 [-1, 1]，与其他预处理器保持一致
+                    data[y * targetW + x] = (gray - 0.5f) / 0.5f;
                 }
                 else
                 {
-                    data[y * targetW + x] = 0f;
+                    // padding 区域：归一化后的零值对应原始的 0.5
+                    data[y * targetW + x] = -1f;
                 }
             }
         }

@@ -21,6 +21,11 @@ public sealed class ExportConfigView
     public int DetInputSize => GetDetInputSize();
     public IReadOnlyList<int> ClsImageShape => GetClsImageShape();
 
+    /// <summary>
+    /// 按点分路径读取配置值（公开访问）。
+    /// </summary>
+    public object? GetByPathPublic(string path) => GetByPath(path);
+
     private object? GetByPath(string path)
     {
         var parts = path.Split('.', StringSplitOptions.RemoveEmptyEntries);

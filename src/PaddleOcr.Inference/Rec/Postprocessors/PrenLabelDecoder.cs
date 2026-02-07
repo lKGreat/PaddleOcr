@@ -53,7 +53,7 @@ public sealed class PrenLabelDecoder : RecDecoderBase
 
         if (textChars.Count == 0)
         {
-            return new RecResult(string.Empty, 1.0f);
+            return new RecResult(string.Empty, 0f);
         }
 
         return BuildResult(textChars, scores);

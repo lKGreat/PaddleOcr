@@ -1,5 +1,9 @@
 using Microsoft.Extensions.Logging;
 using PaddleOcr.Core.Cli;
+using PaddleOcr.Training;
+using PaddleOcr.Training.Rec;
+using TorchSharp;
+using static TorchSharp.torch;
 
 namespace PaddleOcr.Export;
 
@@ -63,16 +67,14 @@ public sealed class ExportExecutor : ICommandExecutor
             var cfg = new ExportConfigView(context.Config, context.ConfigPath!);
             if (subCommand.Equals("export-onnx", StringComparison.OrdinalIgnoreCase))
             {
-                // 尝试使用新的 ONNX 导出器（从 TorchSharp 模型导出）
                 try
                 {
                     var onnxExporter = new OnnxModelExporter(context.Logger);
-                    var outFile = onnxExporter.ExportOnnxFromConfig(cfg);
+                    var outFile = onnxExporter.ExportFromConfig(cfg);
                     return Task.FromResult(CommandResult.Ok($"export-onnx completed. output={outFile}"));
                 }
                 catch
                 {
-                    // 回退到旧的 ONNX 导出（文件复制）
                     var outFile = exporter.ExportOnnx(cfg);
                     return Task.FromResult(CommandResult.Ok($"export-onnx completed. output={outFile}"));
                 }
@@ -80,9 +82,8 @@ public sealed class ExportExecutor : ICommandExecutor
 
             if (subCommand.Equals("export-center", StringComparison.OrdinalIgnoreCase))
             {
-                var centerExporter = new CenterExporter(context.Logger);
-                // TODO: 实现从配置导出中心
-                return Task.FromResult(CommandResult.Fail("export-center not fully implemented yet"));
+                var result = RunExportCenter(cfg, context.Logger);
+                return Task.FromResult(result);
             }
 
             var native = exporter.ExportNative(cfg);
@@ -92,5 +93,88 @@ public sealed class ExportExecutor : ICommandExecutor
         {
             return Task.FromResult(CommandResult.Fail($"{subCommand} failed: {ex.Message}"));
         }
+    }
+
+    /// <summary>
+    /// 执行 export-center 命令：加载模型 -> 遍历训练数据 -> 提取特征 -> 聚合中心 -> 保存。
+    /// </summary>
+    private static CommandResult RunExportCenter(ExportConfigView cfg, ILogger logger)
+    {
+        // 读取字典
+        var dictPath = cfg.RecCharDictPath;
+        if (string.IsNullOrWhiteSpace(dictPath) || !File.Exists(dictPath))
+        {
+            return CommandResult.Fail("export-center requires a valid rec_char_dict_path in config");
+        }
+
+        var (charToId, vocab) = SimpleRecDataset.LoadDictionary(dictPath, useSpaceChar: true);
+
+        // 读取训练数据配置
+        var trainLabelFile = cfg.GetByPathPublic("Train.dataset.label_file_list");
+        string labelFilePath;
+        if (trainLabelFile is List<object?> labelList && labelList.Count > 0 && labelList[0] is not null)
+        {
+            labelFilePath = labelList[0]!.ToString() ?? string.Empty;
+        }
+        else
+        {
+            return CommandResult.Fail("export-center requires Train.dataset.label_file_list in config");
+        }
+
+        var dataDir = cfg.GetByPathPublic("Train.dataset.data_dir")?.ToString() ?? ".";
+        var maxTextLength = int.TryParse(cfg.GetByPathPublic("Global.max_text_length")?.ToString(), out var mtl) ? mtl : 25;
+
+        // 解析图像尺寸
+        var recShapeObj = cfg.GetByPathPublic("Global.rec_image_shape");
+        int h = 48, w = 320;
+        if (recShapeObj is string shapeStr)
+        {
+            var parts = shapeStr.Split(',', StringSplitOptions.TrimEntries);
+            if (parts.Length >= 3 && int.TryParse(parts[1], out var ph) && int.TryParse(parts[2], out var pw))
+            {
+                h = ph;
+                w = pw;
+            }
+        }
+
+        // 构建模型
+        var backboneName = cfg.GetByPathPublic("Architecture.Backbone.name")?.ToString() ?? "MobileNetV1Enhance";
+        var neckName = cfg.GetByPathPublic("Architecture.Neck.name")?.ToString() ?? "SequenceEncoder";
+        var headName = cfg.GetByPathPublic("Architecture.Head.name")?.ToString() ?? "CTCHead";
+        var hiddenSize = int.TryParse(cfg.GetByPathPublic("Architecture.Head.hidden_size")?.ToString(), out var hs) ? hs : 48;
+        var inChannels = int.TryParse(cfg.GetByPathPublic("Architecture.in_channels")?.ToString(), out var ic) ? ic : 3;
+        var numClasses = vocab.Count + 1;
+
+        var model = RecModelBuilder.Build(backboneName, neckName, headName, numClasses, inChannels, hiddenSize, maxTextLength);
+
+        // 加载 checkpoint
+        var ckpt = cfg.Checkpoints;
+        if (string.IsNullOrWhiteSpace(ckpt))
+        {
+            var best = Path.Combine(cfg.SaveModelDir, "best.pt");
+            ckpt = File.Exists(best) ? best : Path.Combine(cfg.SaveModelDir, "latest.pt");
+        }
+
+        if (!File.Exists(ckpt))
+        {
+            model.Dispose();
+            return CommandResult.Fail($"export-center: checkpoint not found: {ckpt}");
+        }
+
+        model.load(ckpt);
+        var dev = cuda.is_available() ? CUDA : CPU;
+        model.to(dev);
+
+        // 加载训练数据集
+        var trainSet = new SimpleRecDataset(labelFilePath, dataDir, h, w, maxTextLength, charToId);
+
+        // 导出中心
+        var centerExporter = new CenterExporter(logger);
+        var outputPath = Path.Combine(cfg.SaveInferenceDir, "train_center.json");
+        var batches = trainSet.GetBatches(32, shuffle: false, new Random(7));
+        centerExporter.ExportCenter(model, batches, h, w, maxTextLength, charToId, vocab, outputPath, device: dev);
+
+        model.Dispose();
+        return CommandResult.Ok($"export-center completed. output={outputPath}");
     }
 }
