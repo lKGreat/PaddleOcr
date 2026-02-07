@@ -19,6 +19,7 @@ internal sealed class SimpleRecTrainer
     {
         var shape = cfg.RecImageShape;
         var (charToId, vocab) = SimpleRecDataset.LoadDictionary(cfg.RecCharDictPath, cfg.UseSpaceChar);
+        EnsureCharsetCoverage(cfg.TrainLabelFile, cfg.EvalLabelFile, charToId, _logger);
         var trainSet = new SimpleRecDataset(cfg.TrainLabelFile, cfg.DataDir, shape.H, shape.W, cfg.MaxTextLength, charToId);
         var evalSet = new SimpleRecDataset(cfg.EvalLabelFile, cfg.EvalDataDir, shape.H, shape.W, cfg.MaxTextLength, charToId);
 
@@ -28,12 +29,29 @@ internal sealed class SimpleRecTrainer
 
         using var model = new SimpleRecNet(vocab.Count + 1, cfg.MaxTextLength);
         model.to(dev);
-        using var optimizer = torch.optim.Adam(model.parameters(), lr: cfg.LearningRate);
+        var lr = cfg.LearningRate;
+        var optimizer = torch.optim.Adam(model.parameters(), lr: lr);
+        var resumeCkpt = cfg.ResumeTraining ? ResolveEvalCheckpoint(cfg) : null;
+        if (!string.IsNullOrWhiteSpace(resumeCkpt))
+        {
+            TryLoadCheckpoint(model, resumeCkpt);
+        }
 
         var rng = new Random(1024);
         float bestAcc = -1f;
+        var epochsCompleted = 0;
+        var staleEpochs = 0;
+        var earlyStopped = false;
         for (var epoch = 1; epoch <= cfg.EpochNum; epoch++)
         {
+            if (cfg.LrDecayStep > 0 && epoch > 1 && (epoch - 1) % cfg.LrDecayStep == 0)
+            {
+                lr *= cfg.LrDecayGamma;
+                optimizer.Dispose();
+                optimizer = torch.optim.Adam(model.parameters(), lr: lr);
+                _logger.LogInformation("lr decayed to {LearningRate:F6} at epoch {Epoch}", lr, epoch);
+            }
+
             model.train();
             var lossSum = 0f;
             var sampleCount = 0;
@@ -57,17 +75,30 @@ internal sealed class SimpleRecTrainer
             if (evalMetrics.Accuracy > bestAcc)
             {
                 bestAcc = evalMetrics.Accuracy;
+                staleEpochs = 0;
                 SaveCheckpoint(cfg.SaveModelDir, model, "best.pt");
+            }
+            else
+            {
+                staleEpochs++;
             }
 
             SaveCheckpoint(cfg.SaveModelDir, model, "latest.pt");
             _logger.LogInformation(
                 "epoch={Epoch}/{Total} train_loss={Loss:F4} eval_acc={EvalAcc:F4} eval_char_acc={CharAcc:F4} eval_edit={Edit:F4}",
                 epoch, cfg.EpochNum, trainLoss, evalMetrics.Accuracy, evalMetrics.CharacterAccuracy, evalMetrics.AvgEditDistance);
+            epochsCompleted = epoch;
+            if (cfg.EarlyStopPatience > 0 && staleEpochs >= cfg.EarlyStopPatience)
+            {
+                earlyStopped = true;
+                _logger.LogInformation("early stop triggered at epoch {Epoch} (patience={Patience})", epoch, cfg.EarlyStopPatience);
+                break;
+            }
         }
 
-        var summary = new TrainingSummary(cfg.EpochNum, bestAcc, cfg.SaveModelDir);
-        SaveSummary(cfg.SaveModelDir, summary);
+        optimizer.Dispose();
+        var summary = new TrainingSummary(epochsCompleted, bestAcc, cfg.SaveModelDir);
+        SaveSummary(cfg, summary, earlyStopped, resumeCkpt);
         return summary;
     }
 
@@ -233,11 +264,64 @@ internal sealed class SimpleRecTrainer
         return null;
     }
 
-    private static void SaveSummary(string saveDir, TrainingSummary summary)
+    private static void SaveSummary(TrainingConfigView cfg, TrainingSummary summary, bool earlyStopped, string? resumeCheckpoint)
     {
-        Directory.CreateDirectory(saveDir);
+        Directory.CreateDirectory(cfg.SaveModelDir);
         var json = JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true });
-        File.WriteAllText(Path.Combine(saveDir, "train_result.json"), json);
+        File.WriteAllText(Path.Combine(cfg.SaveModelDir, "train_result.json"), json);
+        var run = new TrainingRunSummary(
+            ModelType: "rec",
+            EpochsRequested: cfg.EpochNum,
+            EpochsCompleted: summary.Epochs,
+            BestMetricName: "accuracy",
+            BestMetricValue: summary.BestAccuracy,
+            EarlyStopped: earlyStopped,
+            SaveDir: cfg.SaveModelDir,
+            ResumeCheckpoint: resumeCheckpoint,
+            GeneratedAtUtc: DateTime.UtcNow);
+        File.WriteAllText(
+            Path.Combine(cfg.SaveModelDir, "train_run_summary.json"),
+            JsonSerializer.Serialize(run, new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    private static void EnsureCharsetCoverage(string trainLabelFile, string evalLabelFile, IReadOnlyDictionary<char, int> charToId, ILogger logger)
+    {
+        var missing = new HashSet<char>();
+        foreach (var labelFile in new[] { trainLabelFile, evalLabelFile })
+        {
+            if (!File.Exists(labelFile))
+            {
+                continue;
+            }
+
+            foreach (var line in File.ReadLines(labelFile))
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+
+                var split = line.Split('\t', 2);
+                if (split.Length < 2)
+                {
+                    continue;
+                }
+
+                foreach (var ch in split[1])
+                {
+                    if (!charToId.ContainsKey(ch))
+                    {
+                        missing.Add(ch);
+                    }
+                }
+            }
+        }
+
+        if (missing.Count > 0)
+        {
+            var preview = new string(missing.Take(32).ToArray());
+            logger.LogWarning("rec charset missing {Count} chars from labels. example: {Chars}", missing.Count, preview);
+        }
     }
 }
 

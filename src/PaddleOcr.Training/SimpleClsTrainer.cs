@@ -28,12 +28,29 @@ internal sealed class SimpleClsTrainer
 
         using var model = new SimpleClsNet(numClasses);
         model.to(dev);
-        using var optimizer = torch.optim.Adam(model.parameters(), lr: cfg.LearningRate);
+        var lr = cfg.LearningRate;
+        var optimizer = torch.optim.Adam(model.parameters(), lr: lr);
+        var resumeCkpt = cfg.ResumeTraining ? ResolveEvalCheckpoint(cfg) : null;
+        if (!string.IsNullOrWhiteSpace(resumeCkpt))
+        {
+            TryLoadCheckpoint(model, resumeCkpt);
+        }
 
         var rng = new Random(1024);
         float bestAcc = -1f;
+        var epochsCompleted = 0;
+        var staleEpochs = 0;
+        var earlyStopped = false;
         for (var epoch = 1; epoch <= cfg.EpochNum; epoch++)
         {
+            if (cfg.LrDecayStep > 0 && epoch > 1 && (epoch - 1) % cfg.LrDecayStep == 0)
+            {
+                lr *= cfg.LrDecayGamma;
+                optimizer.Dispose();
+                optimizer = torch.optim.Adam(model.parameters(), lr: lr);
+                _logger.LogInformation("lr decayed to {LearningRate:F6} at epoch {Epoch}", lr, epoch);
+            }
+
             model.train();
             var lossSum = 0f;
             var sampleCount = 0;
@@ -62,15 +79,28 @@ internal sealed class SimpleClsTrainer
             if (evalAcc > bestAcc)
             {
                 bestAcc = evalAcc;
+                staleEpochs = 0;
                 SaveCheckpoint(cfg.SaveModelDir, model, "best.pt");
+            }
+            else
+            {
+                staleEpochs++;
             }
 
             SaveCheckpoint(cfg.SaveModelDir, model, "latest.pt");
             _logger.LogInformation("epoch={Epoch}/{Total} train_loss={Loss:F4} train_acc={TrainAcc:F4} eval_acc={EvalAcc:F4}", epoch, cfg.EpochNum, trainLoss, trainAcc, evalAcc);
+            epochsCompleted = epoch;
+            if (cfg.EarlyStopPatience > 0 && staleEpochs >= cfg.EarlyStopPatience)
+            {
+                earlyStopped = true;
+                _logger.LogInformation("early stop triggered at epoch {Epoch} (patience={Patience})", epoch, cfg.EarlyStopPatience);
+                break;
+            }
         }
 
-        var summary = new TrainingSummary(cfg.EpochNum, bestAcc, cfg.SaveModelDir);
-        SaveSummary(cfg.SaveModelDir, summary);
+        optimizer.Dispose();
+        var summary = new TrainingSummary(epochsCompleted, bestAcc, cfg.SaveModelDir);
+        SaveSummary(cfg, "cls", "accuracy", summary, earlyStopped, resumeCkpt);
         return summary;
     }
 
@@ -189,10 +219,24 @@ internal sealed class SimpleClsTrainer
         return null;
     }
 
-    private static void SaveSummary(string saveDir, TrainingSummary summary)
+    private static void SaveSummary(TrainingConfigView cfg, string modelType, string metricName, TrainingSummary summary, bool earlyStopped, string? resumeCheckpoint)
     {
+        Directory.CreateDirectory(cfg.SaveModelDir);
         var json = JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true });
-        File.WriteAllText(Path.Combine(saveDir, "train_result.json"), json);
+        File.WriteAllText(Path.Combine(cfg.SaveModelDir, "train_result.json"), json);
+        var run = new TrainingRunSummary(
+            ModelType: modelType,
+            EpochsRequested: cfg.EpochNum,
+            EpochsCompleted: summary.Epochs,
+            BestMetricName: metricName,
+            BestMetricValue: summary.BestAccuracy,
+            EarlyStopped: earlyStopped,
+            SaveDir: cfg.SaveModelDir,
+            ResumeCheckpoint: resumeCheckpoint,
+            GeneratedAtUtc: DateTime.UtcNow);
+        File.WriteAllText(
+            Path.Combine(cfg.SaveModelDir, "train_run_summary.json"),
+            JsonSerializer.Serialize(run, new JsonSerializerOptions { WriteIndented = true }));
     }
 }
 
@@ -225,6 +269,3 @@ internal sealed class SimpleClsNet : Module<Tensor, Tensor>
         return _classifier.call(flat);
     }
 }
-
-public sealed record TrainingSummary(int Epochs, float BestAccuracy, string SaveDir);
-public sealed record EvaluationSummary(float Accuracy, int Samples);

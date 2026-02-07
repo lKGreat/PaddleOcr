@@ -24,16 +24,16 @@ Status: `done` / `in_progress` / `pending`
 18. done - Deterministic output manifest test coverage
 19. done - Project gitignore guardrails
 20. done - Phase status report
-21. pending
+21. done - Train CLS learning-rate decay schedule (`step_size/gamma`)
 22. pending
-23. pending
-24. pending
-25. pending
-26. pending
-27. pending
-28. pending
-29. pending
-30. pending
+23. done - Early stopping support (`Global.early_stop_patience`)
+24. done - Rec charset coverage validation warnings
+25. done - Resume training from checkpoint (`Global.resume_training`)
+26. done - Unified training run summary schema (`train_run_summary.json`)
+27. done - Export manifest self-validation
+28. done - Export ONNX I/O metadata in manifest
+29. done - Export compatibility fields in manifest
+30. done - Convert precheck with detailed failure message
 31. done - Convert help expansion
 32. done - Service retry policy
 33. done - Service failure dump
@@ -54,4 +54,3 @@ Status: `done` / `in_progress` / `pending`
 48. pending
 49. pending
 50. pending
-

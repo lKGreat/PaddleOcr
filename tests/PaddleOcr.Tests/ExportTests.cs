@@ -41,4 +41,17 @@ public sealed class ExportTests
         doc.RootElement.GetProperty("Format").GetString().Should().Be("torchsharp-native");
         doc.RootElement.GetProperty("ArtifactFile").GetString().Should().Be("model.pt");
     }
+
+    [Fact]
+    public void ValidateJsonModelDir_Should_Report_Missing_Files()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pocr_export_test_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var exporter = new NativeExporter(NullLogger.Instance);
+
+        var ok = exporter.ValidateJsonModelDir(root, out var message);
+
+        ok.Should().BeFalse();
+        message.Should().Contain("missing inference.json");
+    }
 }

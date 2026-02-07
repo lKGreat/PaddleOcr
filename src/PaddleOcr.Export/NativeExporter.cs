@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using Microsoft.ML.OnnxRuntime;
 
 namespace PaddleOcr.Export;
 
@@ -23,9 +24,11 @@ public sealed class NativeExporter
 
         var target = Path.Combine(cfg.SaveInferenceDir, "model.pt");
         File.Copy(ckpt, target, overwrite: true);
+        var manifest = BuildManifest(cfg, "torchsharp-native", DateTime.UtcNow, "model.pt", ckpt, null, null, null, null);
         WriteManifest(
             cfg.SaveInferenceDir,
-            BuildManifest(cfg, "torchsharp-native", DateTime.UtcNow, "model.pt", ckpt, null, null));
+            manifest);
+        ValidateManifestOrThrow(cfg.SaveInferenceDir);
         _logger.LogInformation("Exported native model: {Path}", target);
         return target;
     }
@@ -41,9 +44,12 @@ public sealed class NativeExporter
 
         var target = Path.Combine(cfg.SaveInferenceDir, "inference.onnx");
         File.Copy(onnx, target, overwrite: true);
+        var io = GetOnnxIoMetadata(target);
+        var manifest = BuildManifest(cfg, "onnx", DateTime.UtcNow, "inference.onnx", null, onnx, null, io.Inputs, io.Outputs);
         WriteManifest(
             cfg.SaveInferenceDir,
-            BuildManifest(cfg, "onnx", DateTime.UtcNow, "inference.onnx", null, onnx, null));
+            manifest);
+        ValidateManifestOrThrow(cfg.SaveInferenceDir);
         _logger.LogInformation("Exported ONNX model: {Path}", target);
         return target;
     }
@@ -82,7 +88,11 @@ public sealed class NativeExporter
                 LabelList: [],
                 RecCharDictPath: null,
                 ClsImageShape: [],
-                DetInputSize: null));
+                DetInputSize: null,
+                Compatibility: new ExportCompatibility("1.x", "shim", true),
+                OnnxInputs: [],
+                OnnxOutputs: []));
+        ValidateManifestOrThrow(outputDir);
         _logger.LogInformation("Converted json model dir to pdmodel shim: {Dir}", outputDir);
         return dstModel;
     }
@@ -107,6 +117,43 @@ public sealed class NativeExporter
         return true;
     }
 
+    public bool ValidateManifestFile(string dir, out string message)
+    {
+        var manifestPath = Path.Combine(dir, "manifest.json");
+        if (!File.Exists(manifestPath))
+        {
+            message = "manifest.json not found";
+            return false;
+        }
+
+        try
+        {
+            var json = File.ReadAllText(manifestPath);
+            var manifest = JsonSerializer.Deserialize<ExportManifest>(json);
+            if (manifest is null)
+            {
+                message = "manifest parse failed";
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(manifest.SchemaVersion) ||
+                string.IsNullOrWhiteSpace(manifest.Format) ||
+                string.IsNullOrWhiteSpace(manifest.ArtifactFile))
+            {
+                message = "manifest missing required fields";
+                return false;
+            }
+
+            message = manifestPath;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            message = ex.Message;
+            return false;
+        }
+    }
+
     private static void WriteManifest(string dir, object manifest)
     {
         var json = JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true });
@@ -120,7 +167,9 @@ public sealed class NativeExporter
         string artifactFile,
         string? checkpoint,
         string? source,
-        string? sourceDirectory)
+        string? sourceDirectory,
+        IReadOnlyList<ExportTensorInfo>? onnxInputs,
+        IReadOnlyList<ExportTensorInfo>? onnxOutputs)
     {
         return new ExportManifest(
             SchemaVersion: "1.0",
@@ -134,7 +183,30 @@ public sealed class NativeExporter
             LabelList: cfg.LabelList,
             RecCharDictPath: cfg.RecCharDictPath,
             ClsImageShape: cfg.ClsImageShape,
-            DetInputSize: cfg.DetInputSize);
+            DetInputSize: cfg.DetInputSize,
+            Compatibility: new ExportCompatibility("1.x", "native", true),
+            OnnxInputs: onnxInputs ?? [],
+            OnnxOutputs: onnxOutputs ?? []);
+    }
+
+    private static (IReadOnlyList<ExportTensorInfo> Inputs, IReadOnlyList<ExportTensorInfo> Outputs) GetOnnxIoMetadata(string onnxPath)
+    {
+        using var session = new InferenceSession(onnxPath);
+        var inputs = session.InputMetadata
+            .Select(kv => new ExportTensorInfo(kv.Key, kv.Value.Dimensions.ToArray()))
+            .ToList();
+        var outputs = session.OutputMetadata
+            .Select(kv => new ExportTensorInfo(kv.Key, kv.Value.Dimensions.ToArray()))
+            .ToList();
+        return (inputs, outputs);
+    }
+
+    private void ValidateManifestOrThrow(string dir)
+    {
+        if (!ValidateManifestFile(dir, out var message))
+        {
+            throw new InvalidOperationException($"manifest validation failed: {message}");
+        }
     }
 
     private static string ResolveCheckpoint(ExportConfigView cfg)
@@ -197,4 +269,10 @@ public sealed record ExportManifest(
     IReadOnlyList<string> LabelList,
     string? RecCharDictPath,
     IReadOnlyList<int> ClsImageShape,
-    int? DetInputSize);
+    int? DetInputSize,
+    ExportCompatibility Compatibility,
+    IReadOnlyList<ExportTensorInfo> OnnxInputs,
+    IReadOnlyList<ExportTensorInfo> OnnxOutputs);
+
+public sealed record ExportCompatibility(string ManifestSemVer, string Runtime, bool BackwardCompatible);
+public sealed record ExportTensorInfo(string Name, IReadOnlyList<int> Dims);

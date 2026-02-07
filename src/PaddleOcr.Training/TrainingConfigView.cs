@@ -16,6 +16,10 @@ internal sealed class TrainingConfigView
     public int BatchSize => GetInt("Train.loader.batch_size_per_card", 16);
     public int EvalBatchSize => GetInt("Eval.loader.batch_size_per_card", BatchSize);
     public float LearningRate => GetFloat("Optimizer.lr.learning_rate", 1e-3f);
+    public int LrDecayStep => GetInt("Optimizer.lr.step_size", 0);
+    public float LrDecayGamma => GetFloat("Optimizer.lr.gamma", 0.1f);
+    public int EarlyStopPatience => GetInt("Global.early_stop_patience", 0);
+    public bool ResumeTraining => GetBool("Global.resume_training", true);
     public string SaveModelDir => ResolvePath(GetString("Global.save_model_dir", "./output/cls"));
     public string? Checkpoints => ResolvePathOrNull(GetStringOrNull("Global.checkpoints"));
 

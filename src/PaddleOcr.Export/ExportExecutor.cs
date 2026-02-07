@@ -38,6 +38,11 @@ public sealed class ExportExecutor : ICommandExecutor
                     return Task.FromResult(CommandResult.Fail("convert json2pdmodel requires --json_model_dir and --output_dir"));
                 }
 
+                if (!exporter.ValidateJsonModelDir(jsonDir, out var precheckMessage))
+                {
+                    return Task.FromResult(CommandResult.Fail($"convert json2pdmodel precheck failed: {precheckMessage}"));
+                }
+
                 exporter.ConvertJsonToPdmodel(jsonDir, outputDir);
                 return Task.FromResult(CommandResult.Ok($"convert:json2pdmodel completed. output={outputDir}"));
             }
