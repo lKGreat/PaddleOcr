@@ -6,8 +6,15 @@ namespace PaddleOcr.Tests;
 
 public sealed class DetInferenceExtensionsTests
 {
-    [Fact]
-    public void DecodeBoxes_Should_Work_For_All_Det_Algorithms()
+    [Theory]
+    [InlineData("DB", 74, 36, 226, 114)]
+    [InlineData("DB++", 74, 36, 226, 114)]
+    [InlineData("EAST", 99, 49, 201, 101)]
+    [InlineData("SAST", 99, 49, 201, 101)]
+    [InlineData("PSE", 99, 49, 201, 101)]
+    [InlineData("FCE", 74, 36, 226, 114)]
+    [InlineData("CT", 99, 49, 201, 101)]
+    public void DecodeBoxes_Should_Match_Golden_For_Each_Algorithm(string algorithm, int x1, int y1, int x2, int y2)
     {
         var map = new float[]
         {
@@ -22,12 +29,43 @@ public sealed class DetInferenceExtensionsTests
             new(map, [1, 1, 4, 4])
         };
 
-        foreach (var algorithm in new[] { "DB", "DB++", "EAST", "SAST", "PSE", "FCE", "CT" })
+        var options = NewOptions(algorithm);
+        var boxes = DetInferenceExtensions.DecodeBoxes(options, outputs, 400, 200);
+        boxes.Should().HaveCount(1, $"algorithm={algorithm}");
+        var rect = ToRect(boxes[0]);
+        rect.Should().Be((x1, y1, x2, y2), $"algorithm={algorithm}");
+    }
+
+    [Fact]
+    public void ResolveDetInputSize_Should_Use_Model_Static_Dims()
+    {
+        var options = NewOptions("DB");
+        var size = DetInferenceExtensions.ResolveDetInputSize(options, 2000, 1000, [1, 3, 960, 960]);
+        size.Should().Be((960, 960));
+    }
+
+    [Fact]
+    public void ResolveDetInputSize_Should_Respect_Max_LimitType()
+    {
+        var options = NewOptions("DB") with
         {
-            var options = NewOptions(algorithm);
-            var boxes = DetInferenceExtensions.DecodeBoxes(options, outputs, 400, 200);
-            boxes.Should().NotBeEmpty($"algorithm={algorithm}");
-        }
+            DetLimitType = "max",
+            DetLimitSideLen = 640
+        };
+        var size = DetInferenceExtensions.ResolveDetInputSize(options, 2000, 1000, [1, 3, -1, -1]);
+        size.Should().Be((640, 320));
+    }
+
+    [Fact]
+    public void ResolveDetInputSize_Should_Respect_Min_LimitType()
+    {
+        var options = NewOptions("DB") with
+        {
+            DetLimitType = "min",
+            DetLimitSideLen = 736
+        };
+        var size = DetInferenceExtensions.ResolveDetInputSize(options, 400, 100, [1, 3, -1, -1]);
+        size.Should().Be((2944, 736));
     }
 
     [Fact]
@@ -54,7 +92,7 @@ public sealed class DetInferenceExtensionsTests
         };
         var runtime = new Dictionary<string, DetRuntimeProfile>(StringComparer.OrdinalIgnoreCase)
         {
-            ["img0.png"] = new DetRuntimeProfile(1.2, 2.3, 3.4, 6.9)
+            ["img0.png"] = new DetRuntimeProfile(1.2, 2.3, 3.4, 6.9, 200, 100, 192, 96)
         };
 
         var options = NewOptions("DB") with
@@ -76,9 +114,23 @@ public sealed class DetInferenceExtensionsTests
         perImage.GetArrayLength().Should().Be(1);
         perImage[0].GetProperty("image").GetString().Should().Be("img0.png");
         perImage[0].GetProperty("hmean").GetSingle().Should().BeGreaterThan(0.9f);
+        perImage[0].GetProperty("total_ms").GetDouble().Should().BeApproximately(6.9d, 0.0001d);
+        perImage[0].GetProperty("input_width").GetInt32().Should().Be(192);
+        perImage[0].GetProperty("input_height").GetInt32().Should().Be(96);
         var runtimeProfile = doc.RootElement.GetProperty("algorithm_runtime_profile");
         runtimeProfile.GetProperty("image_count").GetInt32().Should().Be(1);
         runtimeProfile.GetProperty("avg_total_ms").GetDouble().Should().BeApproximately(6.9d, 0.0001d);
+        var runtimePerImage = doc.RootElement.GetProperty("runtime_per_image");
+        runtimePerImage.GetArrayLength().Should().Be(1);
+        runtimePerImage[0].GetProperty("image").GetString().Should().Be("img0.png");
+        runtimePerImage[0].GetProperty("total_ms").GetDouble().Should().BeApproximately(6.9d, 0.0001d);
+    }
+
+    private static (int X1, int Y1, int X2, int Y2) ToRect(OcrBox box)
+    {
+        var xs = box.Points.Select(p => p[0]).ToArray();
+        var ys = box.Points.Select(p => p[1]).ToArray();
+        return (xs.Min(), ys.Min(), xs.Max(), ys.Max());
     }
 
     private static DetOnnxOptions NewOptions(string algorithm)

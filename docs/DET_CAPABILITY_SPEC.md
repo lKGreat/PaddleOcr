@@ -46,13 +46,16 @@ Reference behavior is mapped from `E:\codeding\AI\PaddleOCR-3.3.2\tools` DET too
 
 ## Planned Extensions
 
-1. Add algorithm-aware preprocess parity including resize rules and dynamic shapes.
-2. Add deterministic DET infer regression golden tests per algorithm.
-3. Extend runtime profile from averages to per-image timing export.
-4. Add configurable NMS strategy for polygon-heavy scenes.
+1. Add configurable NMS strategy for polygon-heavy scenes.
+2. Add offline DET benchmark baseline snapshots by algorithm/backbone.
+3. Add richer error buckets in DET quality report (missed/over-segmentation).
+4. Add parity checks against Paddle reference outputs on a pinned fixture set.
 
 ## Implemented In This Iteration
 
 1. Strategy-based DET postprocess routing for `DB|DB++|EAST|SAST|PSE|FCE|CT`.
 2. `det_metrics.json` upgraded to `schema_version=1.1` with `per_image` section.
 3. Added `algorithm_runtime_profile` summary (avg preprocess/inference/postprocess/total ms).
+4. Added dynamic DET resize resolution (`det_limit_type=max|min` + stride alignment) for dynamic ONNX inputs.
+5. Added deterministic golden regression unit tests for each DET algorithm decode path.
+6. Added per-image runtime export (`runtime_per_image`) and runtime fields in `per_image`.

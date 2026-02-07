@@ -31,6 +31,50 @@ public static class DetInferenceExtensions
         return "rgb-chw-01";
     }
 
+    public static (int Width, int Height) ResolveDetInputSize(
+        DetOnnxOptions options,
+        int imageWidth,
+        int imageHeight,
+        IReadOnlyList<int> modelInputDims)
+    {
+        var staticHeight = modelInputDims.Count > 2 ? modelInputDims[2] : -1;
+        var staticWidth = modelInputDims.Count > 3 ? modelInputDims[3] : -1;
+        if (staticHeight > 0 && staticWidth > 0)
+        {
+            return (staticWidth, staticHeight);
+        }
+
+        var srcW = Math.Max(1, imageWidth);
+        var srcH = Math.Max(1, imageHeight);
+        var limitSideLen = Math.Max(32, options.DetLimitSideLen);
+        var limitType = string.IsNullOrWhiteSpace(options.DetLimitType)
+            ? "max"
+            : options.DetLimitType.Trim().ToLowerInvariant();
+
+        var ratio = 1f;
+        if (limitType == "min")
+        {
+            var minSide = Math.Min(srcW, srcH);
+            if (minSide < limitSideLen)
+            {
+                ratio = limitSideLen / (float)minSide;
+            }
+        }
+        else
+        {
+            var maxSide = Math.Max(srcW, srcH);
+            if (maxSide > limitSideLen)
+            {
+                ratio = limitSideLen / (float)maxSide;
+            }
+        }
+
+        var shrinkOnly = ratio < 1f;
+        var resizedW = AlignToStride(srcW * ratio, 32, shrinkOnly);
+        var resizedH = AlignToStride(srcH * ratio, 32, shrinkOnly);
+        return (resizedW, resizedH);
+    }
+
     public static List<OcrBox> DecodeBoxes(
         DetOnnxOptions options,
         IReadOnlyList<TensorOutput> outputs,
@@ -101,8 +145,9 @@ public static class DetInferenceExtensions
                 det_eval_iou_thresh = options.DetEvalIouThresh
             },
             quality = qualityPayload,
-            per_image = BuildPerImageRows(predictions, quality?.Rows),
+            per_image = BuildPerImageRows(predictions, quality?.Rows, runtimeProfiles),
             algorithm_runtime_profile = runtime,
+            runtime_per_image = BuildRuntimePerImageRows(runtimeProfiles),
             generated_at_utc = DateTime.UtcNow
         };
     }
@@ -152,33 +197,99 @@ public static class DetInferenceExtensions
 
     private static IEnumerable<object> BuildPerImageRows(
         IReadOnlyDictionary<string, List<OcrBox>> predictions,
-        IReadOnlyDictionary<string, QualityRow>? qualityRows)
+        IReadOnlyDictionary<string, QualityRow>? qualityRows,
+        IReadOnlyDictionary<string, DetRuntimeProfile> runtimeProfiles)
     {
         foreach (var item in predictions.OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase))
         {
+            var hasRuntime = runtimeProfiles.TryGetValue(item.Key, out var runtime);
             if (qualityRows is not null && qualityRows.TryGetValue(item.Key, out var row))
             {
-                yield return new
+                if (hasRuntime && runtime is not null)
                 {
-                    image = item.Key,
-                    pred_count = item.Value.Count,
-                    gt_count = row.GtCount,
-                    tp = row.TruePositive,
-                    fp = row.FalsePositive,
-                    fn = row.FalseNegative,
-                    precision = row.Precision,
-                    recall = row.Recall,
-                    hmean = row.Hmean
-                };
+                    yield return new
+                    {
+                        image = item.Key,
+                        pred_count = item.Value.Count,
+                        gt_count = row.GtCount,
+                        tp = row.TruePositive,
+                        fp = row.FalsePositive,
+                        fn = row.FalseNegative,
+                        precision = row.Precision,
+                        recall = row.Recall,
+                        hmean = row.Hmean,
+                        preprocess_ms = runtime.PreprocessMs,
+                        inference_ms = runtime.InferenceMs,
+                        postprocess_ms = runtime.PostprocessMs,
+                        total_ms = runtime.TotalMs,
+                        original_width = runtime.OriginalWidth,
+                        original_height = runtime.OriginalHeight,
+                        input_width = runtime.InputWidth,
+                        input_height = runtime.InputHeight
+                    };
+                }
+                else
+                {
+                    yield return new
+                    {
+                        image = item.Key,
+                        pred_count = item.Value.Count,
+                        gt_count = row.GtCount,
+                        tp = row.TruePositive,
+                        fp = row.FalsePositive,
+                        fn = row.FalseNegative,
+                        precision = row.Precision,
+                        recall = row.Recall,
+                        hmean = row.Hmean
+                    };
+                }
             }
             else
             {
-                yield return new
+                if (hasRuntime && runtime is not null)
                 {
-                    image = item.Key,
-                    pred_count = item.Value.Count
-                };
+                    yield return new
+                    {
+                        image = item.Key,
+                        pred_count = item.Value.Count,
+                        preprocess_ms = runtime.PreprocessMs,
+                        inference_ms = runtime.InferenceMs,
+                        postprocess_ms = runtime.PostprocessMs,
+                        total_ms = runtime.TotalMs,
+                        original_width = runtime.OriginalWidth,
+                        original_height = runtime.OriginalHeight,
+                        input_width = runtime.InputWidth,
+                        input_height = runtime.InputHeight
+                    };
+                }
+                else
+                {
+                    yield return new
+                    {
+                        image = item.Key,
+                        pred_count = item.Value.Count
+                    };
+                }
             }
+        }
+    }
+
+    private static IEnumerable<object> BuildRuntimePerImageRows(IReadOnlyDictionary<string, DetRuntimeProfile> runtimeProfiles)
+    {
+        foreach (var item in runtimeProfiles.OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            yield return new
+            {
+                image = item.Key,
+                preprocess_ms = item.Value.PreprocessMs,
+                inference_ms = item.Value.InferenceMs,
+                postprocess_ms = item.Value.PostprocessMs,
+                total_ms = item.Value.TotalMs,
+                original_width = item.Value.OriginalWidth,
+                original_height = item.Value.OriginalHeight,
+                input_width = item.Value.InputWidth,
+                input_height = item.Value.InputHeight
+            };
         }
     }
 
@@ -442,6 +553,18 @@ public static class DetInferenceExtensions
         return dims.Count >= 2 ? Math.Max(1, dims[^2]) * Math.Max(1, dims[^1]) : 0;
     }
 
+    private static int AlignToStride(float value, int stride, bool shrinkOnly)
+    {
+        if (shrinkOnly)
+        {
+            var aligned = (int)Math.Floor(value / stride) * stride;
+            return Math.Max(stride, aligned);
+        }
+
+        var rounded = (int)Math.Round(value / stride, MidpointRounding.AwayFromZero) * stride;
+        return Math.Max(stride, rounded);
+    }
+
     private static float EstimateBoxShortSide(OcrBox box)
     {
         var xs = box.Points.Select(x => x[0]).ToArray();
@@ -641,7 +764,11 @@ public sealed record DetRuntimeProfile(
     double PreprocessMs,
     double InferenceMs,
     double PostprocessMs,
-    double TotalMs);
+    double TotalMs,
+    int OriginalWidth = 0,
+    int OriginalHeight = 0,
+    int InputWidth = 0,
+    int InputHeight = 0);
 
 internal sealed record QualitySummary(
     float Precision,

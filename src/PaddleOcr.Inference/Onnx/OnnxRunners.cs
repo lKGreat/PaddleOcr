@@ -23,7 +23,7 @@ public sealed class DetOnnxRunner
         Directory.CreateDirectory(options.OutputDir);
         using var det = new InferenceSession(options.DetModelPath);
         var inputBuilderName = DetInferenceExtensions.ResolveInputBuilder(options.DetAlgorithm);
-        var defaultSize = Math.Max(32, options.DetLimitSideLen);
+        var inputDims = det.InputMetadata.First().Value.Dimensions.ToArray();
 
         var lines = new List<string>(imageFiles.Count);
         var predictionByImage = new Dictionary<string, List<OcrBox>>(StringComparer.OrdinalIgnoreCase);
@@ -31,8 +31,9 @@ public sealed class DetOnnxRunner
         foreach (var file in imageFiles)
         {
             using var img = Image.Load<Rgb24>(file);
+            var (inputWidth, inputHeight) = DetInferenceExtensions.ResolveDetInputSize(options, img.Width, img.Height, inputDims);
             var totalWatch = Stopwatch.StartNew();
-            var profiled = OnnxRuntimeUtils.RunSessionProfiled(det, img, defaultSize, defaultSize, inputBuilderName);
+            var profiled = OnnxRuntimeUtils.RunSessionProfiled(det, img, inputHeight, inputWidth, inputBuilderName);
             var outputs = profiled.Outputs;
             var postWatch = Stopwatch.StartNew();
             var boxes = outputs.Count == 0
@@ -46,7 +47,11 @@ public sealed class DetOnnxRunner
                 profiled.PreprocessMs,
                 profiled.InferenceMs,
                 postWatch.Elapsed.TotalMilliseconds,
-                totalWatch.Elapsed.TotalMilliseconds);
+                totalWatch.Elapsed.TotalMilliseconds,
+                img.Width,
+                img.Height,
+                inputWidth,
+                inputHeight);
             var payload = sorted.Select(b => new { transcription = "", points = b.Points }).ToList();
             lines.Add($"{imageName}\t{JsonSerializer.Serialize(payload)}");
             predictionByImage[imageName] = sorted;
