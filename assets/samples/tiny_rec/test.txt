@@ -1,0 +1,2 @@
+﻿images/img0.png	ab
+images/img1.png	ba

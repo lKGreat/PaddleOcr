@@ -26,6 +26,10 @@ internal sealed class TrainingConfigView
 
     public (int C, int H, int W) ImageShape => ParseImageShape();
     public int DetInputSize => GetInt("Train.dataset.transforms.ResizeTextImg.size", 640);
+    public (int C, int H, int W) RecImageShape => ParseRecImageShape();
+    public string? RecCharDictPath => ResolvePathOrNull(GetStringOrNull("Global.character_dict_path"));
+    public int MaxTextLength => GetInt("Global.max_text_length", 25);
+    public bool UseSpaceChar => GetBool("Global.use_space_char", true);
 
     private (int C, int H, int W) ParseImageShape()
     {
@@ -36,6 +40,17 @@ internal sealed class TrainingConfigView
         }
 
         return (3, 48, 192);
+    }
+
+    private (int C, int H, int W) ParseRecImageShape()
+    {
+        var shape = GetIntListFromTransforms("Train.dataset.transforms", "RecResizeImg", "image_shape");
+        if (shape.Count >= 3)
+        {
+            return (shape[0], shape[1], shape[2]);
+        }
+
+        return (3, 48, 320);
     }
 
     private string ResolvePath(string path)
@@ -154,5 +169,10 @@ internal sealed class TrainingConfigView
     private float GetFloat(string path, float fallback)
     {
         return float.TryParse(GetByPath(path)?.ToString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : fallback;
+    }
+
+    private bool GetBool(string path, bool fallback)
+    {
+        return bool.TryParse(GetByPath(path)?.ToString(), out var v) ? v : fallback;
     }
 }
