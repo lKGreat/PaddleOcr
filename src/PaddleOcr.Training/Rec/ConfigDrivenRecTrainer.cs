@@ -201,7 +201,12 @@ internal sealed class ConfigDrivenRecTrainer
                 {
                     try
                     {
-                        var teacherBatch = teacher.Run(batchData.Images, batchData.Batch, batchData.Height, batchData.Width);
+                        var teacherBatch = teacher.Run(
+                            batchData.Images,
+                            batchData.Batch,
+                            batchData.Height,
+                            batchData.Width,
+                            batchData.ValidRatios);
                         using var teacherLogits = torch.tensor(teacherBatch.Data, dtype: ScalarType.Float32)
                             .reshape(batchData.Batch, teacherBatch.TimeSteps, teacherBatch.NumClasses)
                             .to(dev);

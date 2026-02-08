@@ -1,5 +1,6 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using Microsoft.ML.OnnxRuntime;
 using PaddleOcr.Inference.Paddle;
 using PaddleOcr.Training.Runtime;
 using TorchSharp;
@@ -88,7 +89,7 @@ internal sealed class SimpleRecTrainer
                 {
                     if (distillEnabled && teacher is not null)
                     {
-                        var teacherBatch = teacher.Run(images, batch, shape.H, shape.W);
+                        var teacherBatch = teacher.Run(images, batch, shape.H, shape.W, validRatios: null);
                         using var teacherLogits = torch.tensor(teacherBatch.Data, dtype: ScalarType.Float32)
                             .reshape(batch, teacherBatch.TimeSteps, teacherBatch.NumClasses)
                             .to(dev);
@@ -430,6 +431,10 @@ internal sealed class RecTeacherDistiller : IDisposable
 {
     private readonly PaddleNative? _native;
     private readonly PaddleNative.PaddlePredictor? _predictor;
+    private readonly InferenceSession? _onnxSession;
+    private readonly string? _onnxInputName;
+    private readonly bool _onnxHasValidRatioInput;
+    private readonly int _onnxValidRatioRank;
     private readonly SimpleRecNet? _torchTeacher;
     private readonly Device _teacherDevice;
     private readonly int _imageH;
@@ -456,6 +461,27 @@ internal sealed class RecTeacherDistiller : IDisposable
     {
         _torchTeacher = teacher;
         _teacherDevice = teacherDevice;
+        _imageH = imageH;
+        _imageW = imageW;
+        TimeSteps = timeSteps;
+        NumClasses = numClasses;
+    }
+
+    private RecTeacherDistiller(
+        InferenceSession onnxSession,
+        string onnxInputName,
+        bool onnxHasValidRatioInput,
+        int onnxValidRatioRank,
+        int timeSteps,
+        int numClasses,
+        int imageH,
+        int imageW)
+    {
+        _onnxSession = onnxSession;
+        _onnxInputName = onnxInputName;
+        _onnxHasValidRatioInput = onnxHasValidRatioInput;
+        _onnxValidRatioRank = onnxValidRatioRank;
+        _teacherDevice = torch.CPU;
         _imageH = imageH;
         _imageW = imageW;
         TimeSteps = timeSteps;
@@ -507,16 +533,49 @@ internal sealed class RecTeacherDistiller : IDisposable
         if (backend == "onnx")
         {
             var onnxPath = ResolveOnnxTeacherPath(cfg, teacherPath);
-            var msg = string.IsNullOrWhiteSpace(onnxPath)
-                ? "teacher_backend=onnx but teacher onnx model path is missing (set Global.teacher_onnx_model_path or put model.onnx in teacher dir)."
-                : $"teacher_backend=onnx is configured with model '{onnxPath}', but ONNX teacher distillation backend is not implemented yet.";
-            if (cfg.StrictTeacherStudent)
+            var msg = "teacher_backend=onnx but teacher onnx model path is missing (set Global.teacher_onnx_model_path or put model.onnx in teacher dir).";
+            if (string.IsNullOrWhiteSpace(onnxPath))
             {
-                throw new NotSupportedException(msg);
+                if (cfg.StrictTeacherStudent)
+                {
+                    throw new NotSupportedException(msg);
+                }
+
+                logger.LogWarning("{Message} distillation disabled because strict_teacher_student=false", msg);
+                return null;
             }
 
-            logger.LogWarning("{Message} distillation disabled because strict_teacher_student=false", msg);
-            return null;
+            return CreateOnnxTeacher(
+                cfg,
+                onnxPath!,
+                logger,
+                imageH,
+                imageW,
+                studentTimeSteps,
+                studentNumClasses);
+        }
+
+        if (backend == "auto")
+        {
+            var onnxPath = ResolveOnnxTeacherPath(cfg, teacherPath);
+            if (!string.IsNullOrWhiteSpace(onnxPath))
+            {
+                try
+                {
+                    return CreateOnnxTeacher(
+                        cfg,
+                        onnxPath!,
+                        logger,
+                        imageH,
+                        imageW,
+                        studentTimeSteps,
+                        studentNumClasses);
+                }
+                catch (Exception ex) when (!cfg.StrictTeacherStudent)
+                {
+                    logger.LogWarning(ex, "teacher_backend=auto ONNX fallback failed, keep trying other backends: {Message}", ex.Message);
+                }
+            }
         }
 
         if (backend != "paddle" && backend != "auto")
@@ -611,7 +670,12 @@ internal sealed class RecTeacherDistiller : IDisposable
         }
     }
 
-    public (float[] Data, int TimeSteps, int NumClasses) Run(float[] batchImages, int batchSize, int imageH, int imageW)
+    public (float[] Data, int TimeSteps, int NumClasses) Run(
+        float[] batchImages,
+        int batchSize,
+        int imageH,
+        int imageW,
+        float[]? validRatios = null)
     {
         if (imageH != _imageH || imageW != _imageW)
         {
@@ -620,7 +684,8 @@ internal sealed class RecTeacherDistiller : IDisposable
 
         if (_predictor is not null)
         {
-            var result = _predictor.Run(batchImages, [batchSize, 3, imageH, imageW], 1f);
+            var validRatio = validRatios is { Length: > 0 } ? validRatios[0] : 1f;
+            var result = _predictor.Run(batchImages, [batchSize, 3, imageH, imageW], validRatio);
             if (result.Dims.Length != 3)
             {
                 throw new InvalidOperationException($"Teacher output must be rank-3 [B,T,C], but got [{string.Join(",", result.Dims)}]");
@@ -633,6 +698,40 @@ internal sealed class RecTeacherDistiller : IDisposable
             }
 
             return (result.Data, TimeSteps, NumClasses);
+        }
+
+        if (_onnxSession is not null)
+        {
+            if (string.IsNullOrWhiteSpace(_onnxInputName))
+            {
+                throw new InvalidOperationException("ONNX teacher input is not initialized.");
+            }
+
+            var inputTensor = new Microsoft.ML.OnnxRuntime.Tensors.DenseTensor<float>(batchImages, [batchSize, 3, imageH, imageW]);
+            var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(_onnxInputName, inputTensor) };
+            if (_onnxHasValidRatioInput)
+            {
+                var vrData = BuildValidRatioData(batchSize, validRatios);
+                var vrDims = _onnxValidRatioRank > 1 ? new[] { batchSize, 1 } : new[] { batchSize };
+                var vrTensor = new Microsoft.ML.OnnxRuntime.Tensors.DenseTensor<float>(vrData, vrDims);
+                inputs.Add(NamedOnnxValue.CreateFromTensor("valid_ratio", vrTensor));
+            }
+
+            using var outputs = _onnxSession.Run(inputs);
+            var outTensor = outputs.First().AsTensor<float>();
+            var dims = outTensor.Dimensions.ToArray();
+            if (dims.Length != 3)
+            {
+                throw new InvalidOperationException($"ONNX teacher output must be rank-3 [B,T,C], but got [{string.Join(",", dims)}]");
+            }
+
+            if (dims[0] != batchSize || dims[1] != TimeSteps || dims[2] != NumClasses)
+            {
+                throw new InvalidOperationException(
+                    $"ONNX teacher output shape changed unexpectedly: got [{string.Join(",", dims)}], expected [{batchSize},{TimeSteps},{NumClasses}]");
+            }
+
+            return (outTensor.ToArray(), TimeSteps, NumClasses);
         }
 
         if (_torchTeacher is null)
@@ -652,6 +751,7 @@ internal sealed class RecTeacherDistiller : IDisposable
     public void Dispose()
     {
         _predictor?.Dispose();
+        _onnxSession?.Dispose();
         _native?.Dispose();
         _torchTeacher?.Dispose();
     }
@@ -704,6 +804,128 @@ internal sealed class RecTeacherDistiller : IDisposable
         return Directory
             .EnumerateFiles(teacherPath, "*.onnx", SearchOption.TopDirectoryOnly)
             .FirstOrDefault();
+    }
+
+    private static RecTeacherDistiller? CreateOnnxTeacher(
+        TrainingConfigView cfg,
+        string onnxModelPath,
+        ILogger logger,
+        int imageH,
+        int imageW,
+        int studentTimeSteps,
+        int studentNumClasses)
+    {
+        var opts = new SessionOptions
+        {
+            GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL
+        };
+
+        if (cfg.TeacherUseGpu)
+        {
+            try
+            {
+                opts.AppendExecutionProvider_CUDA(cfg.TeacherGpuDeviceId);
+            }
+            catch (Exception ex)
+            {
+                var msg = $"failed to enable CUDA for ONNX teacher (gpu_id={cfg.TeacherGpuDeviceId}): {ex.Message}";
+                if (cfg.StrictTeacherStudent)
+                {
+                    throw new InvalidOperationException(msg, ex);
+                }
+
+                logger.LogWarning("{Message} fallback to CPU ONNX teacher", msg);
+            }
+        }
+
+        InferenceSession? session = null;
+        try
+        {
+            session = new InferenceSession(onnxModelPath, opts);
+            var inputName = session.InputMetadata.Keys.FirstOrDefault();
+            if (string.IsNullOrWhiteSpace(inputName))
+            {
+                throw new InvalidOperationException("ONNX teacher has empty input metadata.");
+            }
+
+            var hasValidRatioInput = session.InputMetadata.ContainsKey("valid_ratio");
+            var validRatioRank = hasValidRatioInput
+                ? Math.Max(1, session.InputMetadata["valid_ratio"].Dimensions.Count())
+                : 0;
+
+            var dryInput = new Microsoft.ML.OnnxRuntime.Tensors.DenseTensor<float>(new float[3 * imageH * imageW], [1, 3, imageH, imageW]);
+            var dryInputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(inputName, dryInput) };
+            if (hasValidRatioInput)
+            {
+                var vrData = new float[] { 1f };
+                var vrDims = validRatioRank > 1 ? new[] { 1, 1 } : new[] { 1 };
+                var vrTensor = new Microsoft.ML.OnnxRuntime.Tensors.DenseTensor<float>(vrData, vrDims);
+                dryInputs.Add(NamedOnnxValue.CreateFromTensor("valid_ratio", vrTensor));
+            }
+
+            using var outputs = session.Run(dryInputs);
+            var outTensor = outputs.First().AsTensor<float>();
+            var dims = outTensor.Dimensions.ToArray();
+            if (dims.Length != 3)
+            {
+                throw new InvalidOperationException($"ONNX teacher output must be rank-3 [B,T,C], but got [{string.Join(",", dims)}]");
+            }
+
+            var teacherTime = dims[1];
+            var teacherClasses = dims[2];
+            var mismatch = teacherTime != studentTimeSteps || teacherClasses != studentNumClasses;
+            if (mismatch)
+            {
+                var msg =
+                    $"Teacher/student logits shape mismatch: teacher=[T:{teacherTime}, C:{teacherClasses}], student=[T:{studentTimeSteps}, C:{studentNumClasses}]. " +
+                    "Use same dict/max_text_length as teacher model.";
+                if (cfg.StrictTeacherStudent)
+                {
+                    throw new InvalidOperationException(msg);
+                }
+
+                logger.LogWarning("{Message} distillation disabled because strict_teacher_student=false", msg);
+                session.Dispose();
+                return null;
+            }
+
+            logger.LogInformation(
+                "teacher loaded: backend=onnx, model={Model}, logits=[T:{T}, C:{C}], gpu_requested={UseGpu}, gpu_id={GpuId}",
+                onnxModelPath,
+                teacherTime,
+                teacherClasses,
+                cfg.TeacherUseGpu,
+                cfg.TeacherGpuDeviceId);
+
+            return new RecTeacherDistiller(
+                session,
+                inputName,
+                hasValidRatioInput,
+                validRatioRank,
+                teacherTime,
+                teacherClasses,
+                imageH,
+                imageW);
+        }
+        catch
+        {
+            session?.Dispose();
+            throw;
+        }
+    }
+
+    private static float[] BuildValidRatioData(int batchSize, float[]? validRatios)
+    {
+        if (validRatios is not null && validRatios.Length >= batchSize)
+        {
+            var exact = new float[batchSize];
+            Array.Copy(validRatios, exact, batchSize);
+            return exact;
+        }
+
+        var ones = new float[batchSize];
+        Array.Fill(ones, 1f);
+        return ones;
     }
 
     private static bool IsPaddleInteropFailure(Exception ex)
@@ -784,3 +1006,4 @@ internal sealed class SimpleRecNet : Module<Tensor, Tensor>
         return logitsFlat.reshape(input.shape[0], _maxTextLength, _numClasses);
     }
 }
+
