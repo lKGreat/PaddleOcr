@@ -12,6 +12,8 @@ public static class LRSchedulerBuilder
         config ??= new Dictionary<string, object>();
         var initialLr = GetFloatAny(config, ["initial_lr", "learning_rate"], 0.001f);
         var maxEpochs = GetInt(config, "max_epochs", 100);
+        var maxSteps = GetInt(config, "max_steps", 0);
+        var warmupSteps = GetInt(config, "warmup_steps", 0);
 
         return name.ToLowerInvariant() switch
         {
@@ -21,17 +23,21 @@ public static class LRSchedulerBuilder
             "cosine" or "cosineannealing" or "cosineannealingdecay" => new CosineAnnealingDecay(
                 initialLr: initialLr,
                 minLr: GetFloat(config, "min_lr", Math.Max(1e-7f, initialLr * 0.01f)),
-                maxEpochs: maxEpochs),
+                maxEpochs: maxEpochs,
+                maxSteps: maxSteps),
             "linearwarmupcosine" or "warmupcosine" => new LinearWarmupCosine(
                 initialLr: initialLr,
                 minLr: GetFloat(config, "min_lr", Math.Max(1e-7f, initialLr * 0.01f)),
                 warmupEpochs: GetIntAny(config, ["warmup_epochs", "warmup_epoch"], 5),
-                maxEpochs: maxEpochs),
+                maxEpochs: maxEpochs,
+                warmupSteps: warmupSteps,
+                maxSteps: maxSteps),
             "polynomial" or "polynomialdecay" => new PolynomialDecay(
                 initialLr: initialLr,
                 endLr: GetFloat(config, "end_lr", Math.Max(1e-7f, initialLr * 0.01f)),
                 maxEpochs: maxEpochs,
-                power: GetFloat(config, "power", 1.0f)),
+                power: GetFloat(config, "power", 1.0f),
+                maxSteps: maxSteps),
             "exponential" or "exponentialdecay" => new ExponentialDecay(
                 initialLr: initialLr,
                 gamma: GetFloat(config, "gamma", 0.95f)),
@@ -44,7 +50,7 @@ public static class LRSchedulerBuilder
                 minLr: GetFloat(config, "min_lr", Math.Max(1e-7f, initialLr * 0.01f)),
                 cycleLength: GetInt(config, "cycle_length", 50),
                 decayFactor: GetFloat(config, "decay_factor", 0.5f)),
-            _ => new CosineAnnealingDecay(initialLr, Math.Max(1e-7f, initialLr * 0.01f), maxEpochs)
+            _ => new CosineAnnealingDecay(initialLr, Math.Max(1e-7f, initialLr * 0.01f), maxEpochs, maxSteps)
         };
     }
 

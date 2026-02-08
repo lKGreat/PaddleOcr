@@ -79,7 +79,7 @@ internal sealed class ConfigDrivenRecTrainer
         model.to(dev);
 
         var optimizer = BuildOptimizer(cfg, model);
-        var lrScheduler = BuildLRScheduler(cfg);
+        var lrScheduler = BuildLRScheduler(cfg, trainSet.Count, cfg.BatchSize);
         var lossFn = BuildLoss(cfg, gtcEncodeType);
         _logger.LogInformation("CTC input length mode: {Mode}", cfg.CtcInputLengthMode);
 
@@ -618,10 +618,12 @@ internal sealed class ConfigDrivenRecTrainer
         };
     }
 
-    private ILRScheduler BuildLRScheduler(TrainingConfigView cfg)
+    private ILRScheduler BuildLRScheduler(TrainingConfigView cfg, int trainSampleCount, int batchSize)
     {
         var lrConfig = cfg.GetOptimizerLrConfig();
         var lrName = lrConfig.TryGetValue("name", out var rawName) ? rawName?.ToString() ?? "Cosine" : "Cosine";
+        var stepsPerEpoch = Math.Max(1, (int)Math.Ceiling(trainSampleCount / (double)Math.Max(1, batchSize)));
+        var maxSteps = Math.Max(1, stepsPerEpoch * Math.Max(1, cfg.EpochNum));
         if (!lrConfig.ContainsKey("initial_lr"))
         {
             lrConfig["initial_lr"] = cfg.LearningRate;
@@ -637,12 +639,58 @@ internal sealed class ConfigDrivenRecTrainer
             lrConfig["max_epochs"] = cfg.EpochNum;
         }
 
+        if (!lrConfig.ContainsKey("max_steps"))
+        {
+            lrConfig["max_steps"] = maxSteps;
+        }
+
         if (lrConfig.TryGetValue("warmup_epoch", out var warmupEpoch) && !lrConfig.ContainsKey("warmup_epochs"))
         {
             lrConfig["warmup_epochs"] = warmupEpoch ?? 0;
         }
 
+        if (!lrConfig.ContainsKey("warmup_steps"))
+        {
+            var warmupEpochs = 0;
+            if (lrConfig.TryGetValue("warmup_epochs", out var warmupEpochsObj))
+            {
+                warmupEpochs = ParseInt(warmupEpochsObj, warmupEpochs);
+            }
+            else if (lrConfig.TryGetValue("warmup_epoch", out var warmupEpochObj))
+            {
+                warmupEpochs = ParseInt(warmupEpochObj, warmupEpochs);
+            }
+
+            lrConfig["warmup_steps"] = Math.Max(0, warmupEpochs) * stepsPerEpoch;
+        }
+
+        _logger.LogInformation(
+            "lr scheduler: name={Name}, initial_lr={InitialLr:F6}, steps_per_epoch={StepsPerEpoch}, max_steps={MaxSteps}, warmup_steps={WarmupSteps}",
+            lrName,
+            cfg.LearningRate,
+            stepsPerEpoch,
+            Convert.ToInt32(lrConfig["max_steps"]),
+            Convert.ToInt32(lrConfig["warmup_steps"]));
+
         return LRSchedulerBuilder.Build(lrName, lrConfig);
+    }
+
+    private static int ParseInt(object? raw, int fallback)
+    {
+        if (raw is null)
+        {
+            return fallback;
+        }
+
+        return raw switch
+        {
+            int i => i,
+            long l => (int)l,
+            float f => (int)f,
+            double d => (int)d,
+            decimal m => (int)m,
+            _ => int.TryParse(raw.ToString(), out var parsed) ? parsed : fallback
+        };
     }
 
     private IRecLoss BuildLoss(TrainingConfigView cfg, string? gtcEncodeType)
@@ -720,7 +768,7 @@ internal sealed class ConfigDrivenRecTrainer
         }
 
         var acc = total == 0 ? 0f : (float)correct / total;
-        var charAcc = charTotal == 0 ? 0f : 1f - (float)charErrors / charTotal;
+        var charAcc = charTotal == 0 ? 0f : Math.Clamp(1f - (float)charErrors / charTotal, 0f, 1f);
         var avgEdit = total == 0 ? 0f : (float)editSum / total;
         return new RecEvalMetrics(acc, charAcc, avgEdit);
     }

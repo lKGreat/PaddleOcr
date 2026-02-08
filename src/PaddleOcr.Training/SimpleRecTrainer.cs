@@ -264,7 +264,7 @@ internal sealed class SimpleRecTrainer
         }
 
         var acc = total == 0 ? 0f : (float)correct / total;
-        var charAcc = charTotal == 0 ? 0f : 1f - (float)charErrors / charTotal;
+        var charAcc = charTotal == 0 ? 0f : Math.Clamp(1f - (float)charErrors / charTotal, 0f, 1f);
         var avgEdit = total == 0 ? 0f : (float)editSum / total;
         return new RecEvalMetrics(acc, charAcc, avgEdit);
     }
