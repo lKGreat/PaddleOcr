@@ -327,14 +327,44 @@ internal sealed class SimpleRecTrainer
             return;
         }
 
+        var rollbackPath = Path.Combine(Path.GetTempPath(), $"pocr_simple_rec_rollback_{Guid.NewGuid():N}.pt");
+        var canRollback = false;
         try
         {
+            model.save(rollbackPath);
+            canRollback = true;
             _logger.LogInformation("Loading checkpoint: {Path}", checkpointPath);
             model.load(checkpointPath);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to load checkpoint {Path}", checkpointPath);
+            if (canRollback && File.Exists(rollbackPath))
+            {
+                try
+                {
+                    model.load(rollbackPath);
+                    _logger.LogInformation("Model state restored from rollback snapshot after checkpoint load failure.");
+                }
+                catch (Exception restoreEx)
+                {
+                    _logger.LogWarning(restoreEx, "Failed to restore rollback snapshot {Path}", rollbackPath);
+                }
+            }
+        }
+        finally
+        {
+            if (canRollback && File.Exists(rollbackPath))
+            {
+                try
+                {
+                    File.Delete(rollbackPath);
+                }
+                catch
+                {
+                    // best effort cleanup
+                }
+            }
         }
     }
 

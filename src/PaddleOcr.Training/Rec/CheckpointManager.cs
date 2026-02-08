@@ -100,8 +100,46 @@ public sealed class CheckpointManager
 
         try
         {
-            _logger.LogInformation("Loading model checkpoint: {Path}", modelPath);
-            model.load(modelPath);
+            var rollbackPath = Path.Combine(Path.GetTempPath(), $"pocr_rec_ckptmgr_rollback_{Guid.NewGuid():N}.pt");
+            var canRollback = false;
+            try
+            {
+                model.save(rollbackPath);
+                canRollback = true;
+                _logger.LogInformation("Loading model checkpoint: {Path}", modelPath);
+                model.load(modelPath);
+            }
+            catch
+            {
+                if (canRollback && File.Exists(rollbackPath))
+                {
+                    try
+                    {
+                        model.load(rollbackPath);
+                        _logger.LogInformation("Model state restored from rollback snapshot after full-checkpoint load failure.");
+                    }
+                    catch (Exception restoreEx)
+                    {
+                        _logger.LogWarning(restoreEx, "Failed to restore rollback snapshot {Path}", rollbackPath);
+                    }
+                }
+
+                throw;
+            }
+            finally
+            {
+                if (canRollback && File.Exists(rollbackPath))
+                {
+                    try
+                    {
+                        File.Delete(rollbackPath);
+                    }
+                    catch
+                    {
+                        // best effort cleanup
+                    }
+                }
+            }
         }
         catch (Exception ex)
         {
