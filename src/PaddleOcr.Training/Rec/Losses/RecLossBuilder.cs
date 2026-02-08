@@ -44,8 +44,8 @@ public static class RecLossBuilder
 
     private static IRecLoss BuildMultiLoss(Dictionary<string, object> config)
     {
-        var ctcWeight = GetFloat(config, "ctc_weight", 1.0f);
-        var gtcWeight = GetFloat(config, "gtc_weight", GetFloat(config, "attn_weight", 1.0f));
+        var ctcWeight = GetFloatAny(config, ["weight_1", "ctc_weight"], 1.0f);
+        var gtcWeight = GetFloatAny(config, ["weight_2", "gtc_weight", "attn_weight"], 1.0f);
         var ignoreIndex = GetInt(config, "ignore_index", 0);
 
         IRecLoss ctcLoss = new CTCLoss();
@@ -169,6 +169,21 @@ public static class RecLossBuilder
             long l => l,
             _ => float.TryParse(raw.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) ? parsed : defaultValue
         };
+    }
+
+    private static float GetFloatAny(Dictionary<string, object> config, IReadOnlyList<string> keys, float defaultValue)
+    {
+        foreach (var key in keys)
+        {
+            if (!config.ContainsKey(key))
+            {
+                continue;
+            }
+
+            return GetFloat(config, key, defaultValue);
+        }
+
+        return defaultValue;
     }
 
     private static bool GetBool(Dictionary<string, object> config, string key, bool defaultValue)

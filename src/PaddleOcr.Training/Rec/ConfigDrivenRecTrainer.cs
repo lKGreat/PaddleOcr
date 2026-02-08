@@ -49,7 +49,11 @@ internal sealed class ConfigDrivenRecTrainer
             resizeStrategy,
             enableAugmentation: true,
             useMultiScale: cfg.UseMultiScale,
-            multiScaleWidths: cfg.MultiScaleWidths);
+            multiScaleWidths: cfg.MultiScaleWidths,
+            multiScaleHeights: cfg.MultiScaleHeights,
+            delimiter: cfg.TrainDelimiter,
+            ratioList: cfg.TrainRatioList,
+            seed: cfg.Seed);
 
         var evalSet = new ConfigRecDataset(
             evalLabelFiles,
@@ -61,7 +65,9 @@ internal sealed class ConfigDrivenRecTrainer
             gtcEncoder,
             resizeStrategy,
             enableAugmentation: false,
-            useMultiScale: false);
+            useMultiScale: false,
+            delimiter: cfg.EvalDelimiter,
+            seed: cfg.Seed + 17);
 
         var runtime = TrainingDeviceResolver.Resolve(cfg);
         var dev = runtime.Device;
@@ -75,6 +81,19 @@ internal sealed class ConfigDrivenRecTrainer
         var optimizer = BuildOptimizer(cfg, model);
         var lrScheduler = BuildLRScheduler(cfg);
         var lossFn = BuildLoss(cfg, gtcEncodeType);
+        _logger.LogInformation("CTC input length mode: {Mode}", cfg.CtcInputLengthMode);
+
+        using var teacher = TryCreateTeacherDistiller(cfg, model, shape.H, shape.W, dev);
+        var distillEnabled = teacher is not null;
+        if (distillEnabled)
+        {
+            _logger.LogInformation(
+                "teacher-student distill enabled: teacher={TeacherDir}, alpha={Alpha:F3}, temp={Temp:F3}, strict={Strict}",
+                cfg.TeacherModelDir,
+                cfg.DistillWeight,
+                cfg.DistillTemperature,
+                cfg.StrictTeacherStudent);
+        }
 
         var ckptManager = new CheckpointManager(_logger);
         var ampHelper = runtime.UseAmp ? new AmpTrainingHelper(dev, enabled: true) : null;
@@ -94,6 +113,7 @@ internal sealed class ConfigDrivenRecTrainer
         var epochTracePath = Path.Combine(cfg.SaveModelDir, "train_epoch_summary.jsonl");
         var recentLoss = new Queue<float>(cfg.LogSmoothWindow);
         var stepWatch = Stopwatch.StartNew();
+        var distillMismatchWarned = false;
 
         if (cfg.ResumeTraining)
         {
@@ -126,7 +146,7 @@ internal sealed class ConfigDrivenRecTrainer
 
             foreach (var batchData in trainSet.GetBatches(cfg.BatchSize, shuffle: true, rng))
             {
-                using var x = torch.tensor(batchData.Images, dtype: ScalarType.Float32).reshape(batchData.Batch, 3, shape.H, batchData.Width).to(dev);
+                using var x = torch.tensor(batchData.Images, dtype: ScalarType.Float32).reshape(batchData.Batch, 3, batchData.Height, batchData.Width).to(dev);
                 using var yCtc = torch.tensor(batchData.LabelCtc, dtype: ScalarType.Int64).reshape(batchData.Batch, cfg.MaxTextLength).to(dev);
                 using var yGtc = torch.tensor(batchData.LabelGtc, dtype: ScalarType.Int64).reshape(batchData.Batch, cfg.MaxTextLength).to(dev);
                 using var targetLengths = torch.tensor(batchData.Lengths.Select(x => (long)x).ToArray(), dtype: ScalarType.Int64).to(dev);
@@ -147,7 +167,19 @@ internal sealed class ConfigDrivenRecTrainer
                     ? ctcValue
                     : (predictions.TryGetValue("predict", out var predValue) ? predValue : predictions.Values.First());
                 var ctcTime = ctcLogits.shape.Length >= 2 ? ctcLogits.shape[1] : cfg.MaxTextLength;
-                using var inputLengths = torch.full(new long[] { batchData.Batch }, ctcTime, dtype: ScalarType.Int64, device: dev);
+                var inputLengthArr = new long[batchData.Batch];
+                for (var i = 0; i < batchData.Batch; i++)
+                {
+                    var len = ctcTime;
+                    if (cfg.UseValidRatioForCtcInputLength)
+                    {
+                        var ratio = i < batchData.ValidRatios.Length ? batchData.ValidRatios[i] : 1f;
+                        len = (long)Math.Round(ctcTime * Math.Clamp(ratio, 0f, 1f));
+                    }
+
+                    inputLengthArr[i] = Math.Clamp(len, 1, ctcTime);
+                }
+                using var inputLengths = torch.tensor(inputLengthArr, dtype: ScalarType.Int64, device: dev);
 
                 var lossDict = lossFn.Forward(
                     predictions,
@@ -163,19 +195,64 @@ internal sealed class ConfigDrivenRecTrainer
                     });
 
                 var loss = lossDict["loss"];
-                var lossVal = loss.ToSingle();
+                var baseLossVal = loss.ToSingle();
+                Tensor? kdLoss = null;
+                Tensor? mixedLoss = null;
+                float kdLossVal = 0f;
+                Tensor effectiveLoss = loss;
+                if (distillEnabled && teacher is not null)
+                {
+                    try
+                    {
+                        var teacherBatch = teacher.Run(batchData.Images, batchData.Batch, batchData.Height, batchData.Width);
+                        using var teacherLogits = torch.tensor(teacherBatch.Data, dtype: ScalarType.Float32)
+                            .reshape(batchData.Batch, teacherBatch.TimeSteps, teacherBatch.NumClasses)
+                            .to(dev);
+                        kdLoss = ComputeDistillLossForBatch(
+                            ctcLogits,
+                            teacherLogits,
+                            cfg.DistillTemperature,
+                            cfg.StrictTeacherStudent,
+                            out var skipReason);
+                        if (kdLoss is not null)
+                        {
+                            mixedLoss = loss * (1f - cfg.DistillWeight) + kdLoss * cfg.DistillWeight;
+                            effectiveLoss = mixedLoss;
+                            kdLossVal = kdLoss.ToSingle();
+                        }
+                        else if (!string.IsNullOrWhiteSpace(skipReason) && !distillMismatchWarned)
+                        {
+                            _logger.LogWarning("{Message}", skipReason);
+                            distillMismatchWarned = true;
+                        }
+                    }
+                    catch (Exception ex) when (!cfg.StrictTeacherStudent)
+                    {
+                        if (!distillMismatchWarned)
+                        {
+                            _logger.LogWarning(ex, "teacher distillation disabled for subsequent steps: {Message}", ex.Message);
+                            distillMismatchWarned = true;
+                        }
+
+                        distillEnabled = false;
+                    }
+                }
+
+                var lossVal = effectiveLoss.ToSingle();
                 if (float.IsNaN(lossVal) || float.IsInfinity(lossVal))
                 {
                     _logger.LogWarning("NaN/Inf loss detected at step {Step}, skipping this batch", globalStep);
                     globalStep++;
+                    mixedLoss?.Dispose();
+                    kdLoss?.Dispose();
                     DisposeTensorDictionary(predictions);
                     DisposeTensorDictionary(lossDict);
                     continue;
                 }
 
-                var scaledLoss = ampHelper is not null ? ampHelper.ScaleLoss(loss) : loss;
+                var scaledLoss = ampHelper is not null ? ampHelper.ScaleLoss(effectiveLoss) : effectiveLoss;
                 scaledLoss.backward();
-                if (!ReferenceEquals(scaledLoss, loss))
+                if (!ReferenceEquals(scaledLoss, effectiveLoss))
                 {
                     scaledLoss.Dispose();
                 }
@@ -221,6 +298,7 @@ internal sealed class ConfigDrivenRecTrainer
                     var smoothedLoss = recentLoss.Count == 0 ? lossVal : recentLoss.Average();
                     var stepMs = stepWatch.Elapsed.TotalMilliseconds;
                     stepWatch.Restart();
+                    var meanTargetLen = batchData.Lengths.Length == 0 ? 0f : (float)batchData.Lengths.Average();
                     float? blankRatio = null;
                     if (ctcLogits.shape.Length >= 3)
                     {
@@ -237,22 +315,31 @@ internal sealed class ConfigDrivenRecTrainer
                             epoch,
                             global_step = globalStep,
                             loss = lossVal,
+                            base_loss = baseLossVal,
+                            kd_loss = kdLossVal,
                             smooth_loss = smoothedLoss,
                             lr = lrScheduler.CurrentLR,
                             batch = batchData.Batch,
+                            height = batchData.Height,
                             width = batchData.Width,
+                            ctc_time_steps = ctcTime,
+                            target_len_mean = meanTargetLen,
                             step_ms = stepMs,
                             ctc_blank_ratio = blankRatio,
                             optimizer_step_count = optimizerStepCount,
                             non_zero_grad_steps = nonZeroGradSteps
                         });
                     _logger.LogInformation(
-                        "train step epoch={Epoch} step={Step} loss={Loss:F4} smooth_loss={Smooth:F4} lr={Lr:F6} step_ms={StepMs:F1} ctc_blank_ratio={BlankRatio}",
+                        "train step epoch={Epoch} step={Step} loss={Loss:F4} base_loss={BaseLoss:F4} kd_loss={KdLoss} smooth_loss={Smooth:F4} lr={Lr:F6} ctc_time={CtcTime} tgt_len_mean={TargetLen:F2} step_ms={StepMs:F1} ctc_blank_ratio={BlankRatio}",
                         epoch,
                         globalStep,
                         lossVal,
+                        baseLossVal,
+                        kdLoss is null ? "n/a" : $"{kdLossVal:F4}",
                         smoothedLoss,
                         lrScheduler.CurrentLR,
+                        ctcTime,
+                        meanTargetLen,
                         stepMs,
                         blankRatio is null ? "n/a" : $"{blankRatio.Value:F4}");
                 }
@@ -265,7 +352,7 @@ internal sealed class ConfigDrivenRecTrainer
 
                 if (cfg.CalMetricDuringTrain && ShouldEvalByStep(cfg, globalStep))
                 {
-                    var stepEval = Evaluate(model, evalSet, cfg.EvalBatchSize, shape.H, cfg.MaxTextLength, dev, ctcEncoder.Characters);
+                    var stepEval = Evaluate(model, evalSet, cfg.EvalBatchSize, cfg.MaxTextLength, dev, ctcEncoder.Characters);
                     if (stepEval.Accuracy > bestAcc + cfg.MinImproveDelta)
                     {
                         bestAcc = stepEval.Accuracy;
@@ -293,6 +380,8 @@ internal sealed class ConfigDrivenRecTrainer
                     model.train();
                 }
 
+                mixedLoss?.Dispose();
+                kdLoss?.Dispose();
                 DisposeTensorDictionary(predictions);
                 DisposeTensorDictionary(lossDict);
             }
@@ -303,7 +392,7 @@ internal sealed class ConfigDrivenRecTrainer
             }
 
             var trainLoss = sampleCount == 0 ? 0f : lossSum / sampleCount;
-            var evalMetrics = Evaluate(model, evalSet, cfg.EvalBatchSize, shape.H, cfg.MaxTextLength, dev, ctcEncoder.Characters);
+            var evalMetrics = Evaluate(model, evalSet, cfg.EvalBatchSize, cfg.MaxTextLength, dev, ctcEncoder.Characters);
 
             if (evalMetrics.Accuracy > bestAcc + cfg.MinImproveDelta)
             {
@@ -388,7 +477,9 @@ internal sealed class ConfigDrivenRecTrainer
             ctcEncoder,
             gtcEncoder,
             resizeStrategy,
-            enableAugmentation: false);
+            enableAugmentation: false,
+            delimiter: cfg.EvalDelimiter,
+            seed: cfg.Seed + 17);
 
         var runtime = TrainingDeviceResolver.Resolve(cfg);
         var dev = runtime.Device;
@@ -401,7 +492,7 @@ internal sealed class ConfigDrivenRecTrainer
             TryLoadCheckpoint(model, ckpt);
         }
 
-        var metrics = Evaluate(model, evalSet, cfg.EvalBatchSize, shape.H, cfg.MaxTextLength, dev, ctcEncoder.Characters);
+        var metrics = Evaluate(model, evalSet, cfg.EvalBatchSize, cfg.MaxTextLength, dev, ctcEncoder.Characters);
         model.Dispose();
 
         var summary = new EvaluationSummary(metrics.Accuracy, evalSet.Count);
@@ -559,7 +650,6 @@ internal sealed class ConfigDrivenRecTrainer
         RecModel model,
         ConfigRecDataset evalSet,
         int batchSize,
-        int h,
         int maxTextLength,
         Device dev,
         IReadOnlyList<string> vocab)
@@ -573,7 +663,7 @@ internal sealed class ConfigDrivenRecTrainer
         using var noGrad = torch.no_grad();
         foreach (var batchData in evalSet.GetBatches(batchSize, shuffle: false, new Random(7)))
         {
-            using var x = torch.tensor(batchData.Images, dtype: ScalarType.Float32).reshape(batchData.Batch, 3, h, batchData.Width).to(dev);
+            using var x = torch.tensor(batchData.Images, dtype: ScalarType.Float32).reshape(batchData.Batch, 3, batchData.Height, batchData.Width).to(dev);
             using var y = torch.tensor(batchData.LabelCtc, dtype: ScalarType.Int64).reshape(batchData.Batch, maxTextLength).to(dev);
             var predictions = model.ForwardDict(x);
             var logits = predictions.TryGetValue("ctc", out var ctcValue)
@@ -585,9 +675,10 @@ internal sealed class ConfigDrivenRecTrainer
 
             var predFlat = pred.data<long>().ToArray();
             var gtFlat = gt.data<long>().ToArray();
+            var predTimeSteps = (int)pred.shape[1];
             for (var i = 0; i < batchData.Batch; i++)
             {
-                var predSeq = predFlat.Skip(i * maxTextLength).Take(maxTextLength).ToArray();
+                var predSeq = predFlat.Skip(i * predTimeSteps).Take(predTimeSteps).ToArray();
                 var gtSeq = gtFlat.Skip(i * maxTextLength).Take(maxTextLength).ToArray();
                 var predText = DecodeCtcPrediction(predSeq, vocab);
                 var gtText = DecodeLabel(gtSeq, vocab);
@@ -700,6 +791,120 @@ internal sealed class ConfigDrivenRecTrainer
         }
 
         return sb.ToString();
+    }
+
+    private PaddleOcr.Training.RecTeacherDistiller? TryCreateTeacherDistiller(
+        TrainingConfigView cfg,
+        RecModel model,
+        int imageH,
+        int imageW,
+        Device dev)
+    {
+        if (string.IsNullOrWhiteSpace(cfg.TeacherModelDir))
+        {
+            return null;
+        }
+
+        if (cfg.DistillWeight <= 0f)
+        {
+            throw new InvalidOperationException("Global.teacher_model_dir is set but Global.distill_weight <= 0. Set distill_weight in (0,1].");
+        }
+
+        var widths = cfg.MultiScaleWidths.Distinct().ToArray();
+        var heights = cfg.MultiScaleHeights.Distinct().ToArray();
+        if (cfg.UseMultiScale && (widths.Length > 1 || heights.Length > 1))
+        {
+            var msg = "Teacher distillation with multi-scale training (multiple widths/heights) is not supported in strict shape mode. Use a single train scale or disable distillation.";
+            if (cfg.StrictTeacherStudent)
+            {
+                throw new InvalidOperationException(msg);
+            }
+
+            _logger.LogWarning("{Message}", msg);
+            return null;
+        }
+
+        using var noGrad = torch.no_grad();
+        using var dryInput = torch.zeros([1, 3, imageH, imageW], dtype: ScalarType.Float32, device: dev);
+        var dryPredictions = model.ForwardDict(dryInput);
+        try
+        {
+            var dryCtc = dryPredictions.TryGetValue("ctc", out var ctcValue)
+                ? ctcValue
+                : (dryPredictions.TryGetValue("predict", out var predValue) ? predValue : dryPredictions.Values.First());
+            if (dryCtc.shape.Length != 3)
+            {
+                throw new InvalidOperationException($"Student CTC logits must be rank-3 [B,T,C], but got [{string.Join(",", dryCtc.shape)}]");
+            }
+
+            var studentTimeSteps = (int)dryCtc.shape[1];
+            var studentNumClasses = (int)dryCtc.shape[2];
+            return PaddleOcr.Training.RecTeacherDistiller.TryCreate(
+                cfg,
+                _logger,
+                imageH,
+                imageW,
+                studentTimeSteps,
+                studentNumClasses);
+        }
+        finally
+        {
+            DisposeTensorDictionary(dryPredictions);
+        }
+    }
+
+    private static Tensor? ComputeDistillLossForBatch(
+        Tensor studentLogits,
+        Tensor teacherLogits,
+        float temperature,
+        bool strictTeacherStudent,
+        out string? skipReason)
+    {
+        skipReason = null;
+        if (studentLogits.shape.Length != 3 || teacherLogits.shape.Length != 3)
+        {
+            var msg = $"Teacher/student logits must be rank-3 [B,T,C], got student=[{string.Join(",", studentLogits.shape)}], teacher=[{string.Join(",", teacherLogits.shape)}].";
+            if (strictTeacherStudent)
+            {
+                throw new InvalidOperationException(msg);
+            }
+
+            skipReason = msg + " distillation skipped because strict_teacher_student=false.";
+            return null;
+        }
+
+        var sb = studentLogits.shape[0];
+        var st = studentLogits.shape[1];
+        var sc = studentLogits.shape[2];
+        var tb = teacherLogits.shape[0];
+        var tt = teacherLogits.shape[1];
+        var tc = teacherLogits.shape[2];
+        if (sb != tb || st != tt || sc != tc)
+        {
+            var msg =
+                $"Teacher/student logits shape mismatch: student=[B:{sb}, T:{st}, C:{sc}], teacher=[B:{tb}, T:{tt}, C:{tc}]. " +
+                "Use same rec_image_shape, dict and max_text_length as teacher model.";
+            if (strictTeacherStudent)
+            {
+                throw new InvalidOperationException(msg);
+            }
+
+            skipReason = msg + " distillation skipped because strict_teacher_student=false.";
+            return null;
+        }
+
+        return ComputeDistillLoss(studentLogits, teacherLogits, temperature);
+    }
+
+    private static Tensor ComputeDistillLoss(Tensor studentLogits, Tensor teacherLogits, float temperature)
+    {
+        using var studentScaled = studentLogits / temperature;
+        using var teacherScaled = teacherLogits / temperature;
+        using var studentLogProb = torch.nn.functional.log_softmax(studentScaled, dim: -1);
+        using var teacherProb = torch.nn.functional.softmax(teacherScaled, dim: -1);
+        using var teacherLogProb = torch.nn.functional.log_softmax(teacherScaled, dim: -1);
+        using var tokenKl = (teacherProb * (teacherLogProb - studentLogProb)).sum(dim: -1);
+        return tokenKl.mean() * (temperature * temperature);
     }
 
     private void TryLoadCheckpoint(RecModel model, string checkpointPath)

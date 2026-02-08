@@ -5,7 +5,8 @@ using static TorchSharp.torch.nn;
 namespace PaddleOcr.Training.Rec.Losses;
 
 /// <summary>
-/// NRTRLoss：NRTR 损失，CrossEntropy + label smoothing + padding mask。
+/// NRTR loss with padding mask and optional label smoothing.
+/// Aligns target slicing behavior with Paddle rec_nrtr_loss.
 /// </summary>
 public sealed class NRTRLoss : IRecLoss
 {
@@ -23,30 +24,46 @@ public sealed class NRTRLoss : IRecLoss
         var logits = predictions["predict"]; // [B, T, C]
         var targets = batch.ContainsKey("label_gtc") ? batch["label_gtc"] : batch["label"]; // [B, T]
 
-        // 创建 padding mask
-        var mask = targets.ne(_paddingIdx).to(ScalarType.Float32); // [B, T]
+        // Paddle parity: tgt = label[:, 1 : 2 + max(length)]
+        var effectiveTargets = targets;
+        if (batch.TryGetValue("length", out var lengths) || batch.TryGetValue("target_lengths", out lengths))
+        {
+            using var lengthsCpu = lengths.to_type(ScalarType.Int64).cpu();
+            var lengthArr = lengthsCpu.data<long>().ToArray();
+            if (lengthArr.Length > 0)
+            {
+                var maxLen = (int)Math.Max(0L, lengthArr.Max());
+                var targetEndExclusive = Math.Min((int)targets.shape[1], 2 + maxLen);
+                if (targetEndExclusive > 1)
+                {
+                    effectiveTargets = targets.narrow(1, 1, targetEndExclusive - 1);
+                }
+            }
+        }
 
-        // Reshape: [B, T, C] -> [B*T, C]
-        var b = logits.shape[0];
-        var t = logits.shape[1];
-        var c = logits.shape[2];
-        logits = logits.reshape(b * t, c);
-        targets = targets.reshape(b * t).to(ScalarType.Int64);
-        mask = mask.reshape(b * t);
+        var targetTime = (int)effectiveTargets.shape[1];
+        var predTime = (int)logits.shape[1];
+        var alignedTime = Math.Max(1, Math.Min(targetTime, predTime));
+        if (targetTime != alignedTime)
+        {
+            effectiveTargets = effectiveTargets.narrow(1, 0, alignedTime);
+        }
 
-        // CrossEntropy loss
-        var loss = functional.cross_entropy(logits, targets, reduction: Reduction.None);
-        
-        // Apply mask
+        var effectiveLogits = predTime == alignedTime ? logits : logits.narrow(1, 0, alignedTime);
+        var b = effectiveLogits.shape[0];
+        var c = effectiveLogits.shape[2];
+
+        var logits2d = effectiveLogits.reshape(b * alignedTime, c);
+        var targets1d = effectiveTargets.reshape(b * alignedTime).to(ScalarType.Int64);
+        var mask = targets1d.ne(_paddingIdx).to(ScalarType.Float32);
+
+        var loss = functional.cross_entropy(logits2d, targets1d, reduction: Reduction.None);
         loss = (loss * mask).sum() / (mask.sum() + 1e-8f);
 
-        // Label smoothing：对非 padding 位置应用标准 label smoothing
-        // 参考: https://arxiv.org/abs/1512.00567
         if (_labelSmoothing > 0.0f)
         {
-            using var logProbs = functional.log_softmax(logits, dim: -1); // [B*T, C]
-            // 均匀分布的交叉熵 = -mean(log_softmax)（对每个时间步）
-            using var uniformLoss = -logProbs.mean(new long[] { -1 }); // [B*T]
+            using var logProbs = functional.log_softmax(logits2d, dim: -1);
+            using var uniformLoss = -logProbs.mean(new long[] { -1 });
             var maskedUniformLoss = (uniformLoss * mask).sum() / (mask.sum() + 1e-8f);
             loss = (1.0f - _labelSmoothing) * loss + _labelSmoothing * maskedUniformLoss;
         }

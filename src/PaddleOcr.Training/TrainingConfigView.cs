@@ -44,11 +44,16 @@ internal sealed class TrainingConfigView
     public float DistillWeight => Clamp(GetFloat("Global.distill_weight", 0f), 0f, 1f);
     public float DistillTemperature => Math.Max(1e-3f, GetFloat("Global.distill_temperature", 1f));
     public bool StrictTeacherStudent => GetBool("Global.strict_teacher_student", true);
+    public string CtcInputLengthMode => ResolveCtcInputLengthMode();
+    public bool UseValidRatioForCtcInputLength => CtcInputLengthMode == "valid_ratio";
 
     public string TrainLabelFile => ResolvePath(GetFirstString("Train.dataset.label_file_list"));
     public string EvalLabelFile => ResolvePath(GetFirstString("Eval.dataset.label_file_list"));
     public IReadOnlyList<string> TrainLabelFiles => GetStringList("Train.dataset.label_file_list").Select(ResolvePath).ToList();
     public IReadOnlyList<string> EvalLabelFiles => GetStringList("Eval.dataset.label_file_list").Select(ResolvePath).ToList();
+    public string TrainDelimiter => GetString("Train.dataset.delimiter", "\t");
+    public string EvalDelimiter => GetString("Eval.dataset.delimiter", TrainDelimiter);
+    public IReadOnlyList<float> TrainRatioList => ParseRatioList("Train.dataset.ratio_list");
     public string DataDir => ResolvePath(GetString("Train.dataset.data_dir", "."));
     public string EvalDataDir => ResolvePath(GetString("Eval.dataset.data_dir", DataDir));
     public string InvalidSamplePolicy => GetString("Train.dataset.invalid_sample_policy", "skip").Trim().ToLowerInvariant();
@@ -301,6 +306,17 @@ internal sealed class TrainingConfigView
         return Device.StartsWith("cuda", StringComparison.OrdinalIgnoreCase);
     }
 
+    private string ResolveCtcInputLengthMode()
+    {
+        var raw = (GetStringOrNull("Global.ctc_input_length_mode") ?? string.Empty).Trim().ToLowerInvariant();
+        return raw switch
+        {
+            "valid_ratio" => "valid_ratio",
+            "full" => "full",
+            _ => "full"
+        };
+    }
+
     private static float Clamp(float value, float min, float max)
     {
         return Math.Clamp(value, min, max);
@@ -387,33 +403,8 @@ internal sealed class TrainingConfigView
     {
         get
         {
-            if (!GetString("Train.dataset.name", "").Equals("MultiScaleDataSet", StringComparison.OrdinalIgnoreCase))
-            {
-                return false;
-            }
-
-            var raw = GetByPath("Train.dataset.ds_width");
-            if (raw is null)
-            {
-                return true;
-            }
-
-            if (raw is bool b)
-            {
-                return b;
-            }
-
-            if (bool.TryParse(raw.ToString(), out var parsed))
-            {
-                return parsed;
-            }
-
-            if (raw is IList<object?> list)
-            {
-                return list.Count > 0;
-            }
-
-            return true;
+            return GetString("Train.dataset.name", "")
+                .Equals("MultiScaleDataSet", StringComparison.OrdinalIgnoreCase);
         }
     }
 
@@ -425,6 +416,19 @@ internal sealed class TrainingConfigView
     {
         get
         {
+            if (TryGetSamplerScales(out var scales) && scales.Length > 0)
+            {
+                var widths = scales
+                    .Select(s => s.Width)
+                    .Where(w => w > 0)
+                    .Distinct()
+                    .ToArray();
+                if (widths.Length > 0)
+                {
+                    return widths;
+                }
+            }
+
             var raw = GetByPath("Train.dataset.ds_width");
             if (raw is bool b && !b)
             {
@@ -439,6 +443,27 @@ internal sealed class TrainingConfigView
                 return parsed.Length == 0 ? [RecImageShape.W] : parsed;
             }
             return [320, 256, 192, 128, 96, 64];
+        }
+    }
+
+    public int[] MultiScaleHeights
+    {
+        get
+        {
+            if (TryGetSamplerScales(out var scales) && scales.Length > 0)
+            {
+                var heights = scales
+                    .Select(s => s.Height)
+                    .Where(h => h > 0)
+                    .Distinct()
+                    .ToArray();
+                if (heights.Length > 0)
+                {
+                    return heights;
+                }
+            }
+
+            return [RecImageShape.H];
         }
     }
 
@@ -463,5 +488,89 @@ internal sealed class TrainingConfigView
         }
 
         return (0, 2000);
+    }
+
+    private IReadOnlyList<float> ParseRatioList(string path)
+    {
+        var raw = GetByPath(path);
+        if (raw is null)
+        {
+            return [1f];
+        }
+
+        if (raw is IList<object?> list)
+        {
+            var parsed = list
+                .Select(ParseFloatOrNaN)
+                .Where(v => !float.IsNaN(v))
+                .ToArray();
+            return parsed.Length == 0 ? [1f] : parsed;
+        }
+
+        var scalar = ParseFloatOrNaN(raw);
+        return float.IsNaN(scalar) ? [1f] : [scalar];
+    }
+
+    private bool TryGetSamplerScales(out (int Width, int Height)[] scales)
+    {
+        scales = [];
+        var raw = GetByPath("Train.sampler.scales");
+        if (raw is not IList<object?> list || list.Count == 0)
+        {
+            return false;
+        }
+
+        var parsed = new List<(int Width, int Height)>();
+        foreach (var item in list)
+        {
+            if (item is not IList<object?> shape || shape.Count < 2)
+            {
+                continue;
+            }
+
+            if (!int.TryParse(shape[0]?.ToString(), out var w) || !int.TryParse(shape[1]?.ToString(), out var h))
+            {
+                continue;
+            }
+
+            if (w > 0 && h > 0)
+            {
+                parsed.Add((w, h));
+            }
+        }
+
+        scales = parsed.ToArray();
+        return scales.Length > 0;
+    }
+
+    private static float ParseFloatOrNaN(object? raw)
+    {
+        if (raw is null)
+        {
+            return float.NaN;
+        }
+
+        if (raw is float f)
+        {
+            return f;
+        }
+
+        if (raw is double d)
+        {
+            return (float)d;
+        }
+
+        if (raw is int i)
+        {
+            return i;
+        }
+
+        return float.TryParse(
+            raw.ToString(),
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var parsed)
+            ? parsed
+            : float.NaN;
     }
 }

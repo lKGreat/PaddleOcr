@@ -127,7 +127,7 @@ public sealed class RecTrainingParityTests
     }
 
     [Fact]
-    public async Task TrainRec_WithTeacherModelDir_Should_Force_SimpleTrainer_And_Validate_Teacher()
+    public async Task TrainRec_WithTeacherModelDir_Should_Validate_Teacher_In_ConfigDrivenTrainer()
     {
         var root = FindRepoRoot();
         var samples = Path.Combine(root, "assets", "samples", "tiny_rec");

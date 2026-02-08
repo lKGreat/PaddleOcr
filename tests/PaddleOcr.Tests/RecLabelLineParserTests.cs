@@ -34,4 +34,14 @@ public sealed class RecLabelLineParserTests
         img.Should().Be("train/word_3.png");
         text.Should().Be("New York City");
     }
+
+    [Fact]
+    public void TryParse_Should_Honor_Custom_Delimiter()
+    {
+        var ok = RecLabelLineParser.TryParse("train/word_4.png,hello world", ",", out var img, out var text);
+
+        ok.Should().BeTrue();
+        img.Should().Be("train/word_4.png");
+        text.Should().Be("hello world");
+    }
 }

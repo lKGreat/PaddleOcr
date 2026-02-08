@@ -290,14 +290,14 @@ public sealed class RecModel : Module<Tensor, Tensor>
     {
         if (_transform is not null)
         {
-            using var transformed = _transform.call(input);
-            using var featFromTransform = _backbone.call(transformed);
-            using var seqFromTransform = _neck.call(featFromTransform);
+            var transformed = _transform.call(input);
+            var featFromTransform = _backbone.call(transformed);
+            var seqFromTransform = _neck.call(featFromTransform);
             return _head.call(seqFromTransform);
         }
 
-        using var feat = _backbone.call(input);
-        using var seq = _neck.call(feat);
+        var feat = _backbone.call(input);
+        var seq = _neck.call(feat);
         return _head.call(seq);
     }
 
@@ -308,9 +308,9 @@ public sealed class RecModel : Module<Tensor, Tensor>
     {
         if (_transform is not null)
         {
-            using var transformed = _transform.call(input);
-            using var featFromTransform = _backbone.call(transformed);
-            using var seqFromTransform = _neck.call(featFromTransform);
+            var transformed = _transform.call(input);
+            var featFromTransform = _backbone.call(transformed);
+            var seqFromTransform = _neck.call(featFromTransform);
             if (_head is IRecHead recHeadFromTransform)
             {
                 return recHeadFromTransform.Forward(seqFromTransform, targets);
@@ -320,8 +320,8 @@ public sealed class RecModel : Module<Tensor, Tensor>
             return new Dictionary<string, Tensor> { ["predict"] = logitsFromTransform };
         }
 
-        using var feat = _backbone.call(input);
-        using var seq = _neck.call(feat);
+        var feat = _backbone.call(input);
+        var seq = _neck.call(feat);
         if (_head is IRecHead recHead)
         {
             return recHead.Forward(seq, targets);

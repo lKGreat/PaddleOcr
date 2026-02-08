@@ -11,6 +11,7 @@ internal sealed class ConfigRecDataset
     private readonly int _targetH;
     private readonly int _targetW;
     private readonly int[] _multiScaleWidths;
+    private readonly int[] _multiScaleHeights;
     private readonly bool _useMultiScale;
     private readonly int _maxTextLength;
     private readonly IRecLabelEncoder _ctcEncoder;
@@ -29,7 +30,11 @@ internal sealed class ConfigRecDataset
         IRecTrainingResize? resizer = null,
         bool enableAugmentation = false,
         bool useMultiScale = false,
-        int[]? multiScaleWidths = null)
+        int[]? multiScaleWidths = null,
+        int[]? multiScaleHeights = null,
+        string? delimiter = null,
+        IReadOnlyList<float>? ratioList = null,
+        int seed = 1024)
     {
         _targetH = targetH;
         _targetW = targetW;
@@ -47,7 +52,15 @@ internal sealed class ConfigRecDataset
             _multiScaleWidths = [targetW];
         }
 
-        _samples = LoadSamples(labelFiles, dataDir);
+        _multiScaleHeights = (multiScaleHeights is { Length: > 0 } ? multiScaleHeights : [targetH])
+            .Where(h => h > 0)
+            .ToArray();
+        if (_multiScaleHeights.Length == 0)
+        {
+            _multiScaleHeights = [targetH];
+        }
+
+        _samples = LoadSamples(labelFiles, dataDir, delimiter, ratioList, seed);
     }
 
     public int Count => _samples.Count;
@@ -69,6 +82,7 @@ internal sealed class ConfigRecDataset
         {
             var take = Math.Min(batchSize, indices.Count - offset);
             var batchW = _useMultiScale ? _multiScaleWidths[widthIdx++ % _multiScaleWidths.Length] : _targetW;
+            var batchH = _useMultiScale ? _multiScaleHeights[(widthIdx - 1) % _multiScaleHeights.Length] : _targetH;
 
             var imageList = new List<float[]>(take);
             var ctcLabels = new List<long[]>(take);
@@ -97,7 +111,7 @@ internal sealed class ConfigRecDataset
                     RecAugmentation.ApplyAugmentation(img);
                 }
 
-                var resized = _resizer.Resize(img, 3, _targetH, batchW);
+                var resized = _resizer.Resize(img, 3, batchH, batchW);
                 imageList.Add(resized.Data);
                 ctcLabels.Add(FitLabel(encodedCtc.Label, _maxTextLength));
                 gtcLabels.Add(FitLabel(encodedGtc.Label, _maxTextLength));
@@ -129,6 +143,7 @@ internal sealed class ConfigRecDataset
                 lengths.ToArray(),
                 validRatios.ToArray(),
                 validCount,
+                batchH,
                 batchW);
         }
     }
@@ -141,27 +156,39 @@ internal sealed class ConfigRecDataset
         return result;
     }
 
-    private static List<(string ImagePath, string Text)> LoadSamples(IReadOnlyList<string> labelFiles, string dataDir)
+    private static List<(string ImagePath, string Text)> LoadSamples(
+        IReadOnlyList<string> labelFiles,
+        string dataDir,
+        string? delimiter,
+        IReadOnlyList<float>? ratioList,
+        int seed)
     {
         var all = new List<(string, string)>();
-        foreach (var labelFile in labelFiles)
+        for (var fileIdx = 0; fileIdx < labelFiles.Count; fileIdx++)
         {
+            var labelFile = labelFiles[fileIdx];
             if (!File.Exists(labelFile))
             {
                 throw new FileNotFoundException($"Label file not found: {labelFile}");
             }
 
-            foreach (var line in File.ReadLines(labelFile))
+            var lines = File.ReadLines(labelFile)
+                .Where(line => !string.IsNullOrWhiteSpace(line))
+                .ToList();
+            var ratio = ResolveRatio(ratioList, fileIdx);
+            if (ratio <= 0f)
             {
-                if (string.IsNullOrWhiteSpace(line))
+                continue;
+            }
+
+            var selectedLines = SelectByRatio(lines, ratio, seed + fileIdx);
+            foreach (var line in selectedLines)
+            {
+                if (!RecLabelLineParser.TryParse(line, delimiter, out var img, out var text))
                 {
                     continue;
                 }
 
-                if (!RecLabelLineParser.TryParse(line, out var img, out var text))
-                {
-                    continue;
-                }
                 var fullPath = Path.IsPathRooted(img) ? img : Path.GetFullPath(Path.Combine(dataDir, img));
                 if (!File.Exists(fullPath))
                 {
@@ -179,6 +206,50 @@ internal sealed class ConfigRecDataset
 
         return all;
     }
+
+    private static IEnumerable<string> SelectByRatio(IReadOnlyList<string> lines, float ratio, int seed)
+    {
+        if (lines.Count == 0)
+        {
+            return [];
+        }
+
+        if (ratio >= 0.9999f)
+        {
+            return lines;
+        }
+
+        var sampleCount = Math.Clamp((int)Math.Round(lines.Count * ratio), 1, lines.Count);
+        var indices = Enumerable.Range(0, lines.Count).ToArray();
+        var rng = new Random(seed);
+        for (var i = indices.Length - 1; i > 0; i--)
+        {
+            var j = rng.Next(i + 1);
+            (indices[i], indices[j]) = (indices[j], indices[i]);
+        }
+
+        return indices.Take(sampleCount).Select(i => lines[i]);
+    }
+
+    private static float ResolveRatio(IReadOnlyList<float>? ratioList, int fileIndex)
+    {
+        if (ratioList is null || ratioList.Count == 0)
+        {
+            return 1f;
+        }
+
+        if (ratioList.Count == 1)
+        {
+            return Math.Clamp(ratioList[0], 0f, 1f);
+        }
+
+        if (fileIndex < ratioList.Count)
+        {
+            return Math.Clamp(ratioList[fileIndex], 0f, 1f);
+        }
+
+        return 1f;
+    }
 }
 
 internal sealed record ConfigRecBatch(
@@ -188,4 +259,5 @@ internal sealed record ConfigRecBatch(
     int[] Lengths,
     float[] ValidRatios,
     int Batch,
+    int Height,
     int Width);
