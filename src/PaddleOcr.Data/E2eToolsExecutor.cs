@@ -223,7 +223,7 @@ public sealed class E2eToolsExecutor : ICommandExecutor
                     continue;
                 }
 
-                if (!TryGetCropRect(pointsEl, image.Width, image.Height, out var cropRect))
+                if (!TryCreateRecCrop(image, pointsEl, out var crop))
                 {
                     skipped++;
                     continue;
@@ -231,7 +231,6 @@ public sealed class E2eToolsExecutor : ICommandExecutor
 
                 var cropName = $"{Path.GetFileNameWithoutExtension(fullImagePath)}_{saved:D7}.jpg";
                 var cropPath = Path.Combine(imagesDir, cropName);
-                using var crop = image.Clone(ctx => ctx.Crop(cropRect));
                 crop.Save(cropPath, new JpegEncoder { Quality = 95 });
                 entries.Add($"images/{cropName}\t{text}");
                 saved++;
@@ -251,10 +250,36 @@ public sealed class E2eToolsExecutor : ICommandExecutor
         return entries;
     }
 
-    private static bool TryGetCropRect(JsonElement pointsEl, int imageW, int imageH, out SixLabors.ImageSharp.Rectangle rect)
+    private static bool TryCreateRecCrop(Image<Rgb24> image, JsonElement pointsEl, out Image<Rgb24> crop)
     {
-        var xs = new List<float>(8);
-        var ys = new List<float>(8);
+        crop = default!;
+        if (!TryParsePoints(pointsEl, out var points))
+        {
+            return false;
+        }
+
+        if (points.Count == 4 && TryPerspectiveCrop(image, points, out crop))
+        {
+            return true;
+        }
+
+        if (TryGetCropRect(points, image.Width, image.Height, out var rect))
+        {
+            crop = image.Clone(ctx => ctx.Crop(rect));
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryParsePoints(JsonElement pointsEl, out List<DrawingPointF> points)
+    {
+        points = new List<DrawingPointF>(8);
+        if (pointsEl.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
         foreach (var point in pointsEl.EnumerateArray())
         {
             if (point.ValueKind != JsonValueKind.Array)
@@ -273,20 +298,24 @@ public sealed class E2eToolsExecutor : ICommandExecutor
                 continue;
             }
 
-            xs.Add(x);
-            ys.Add(y);
+            points.Add(new DrawingPointF(x, y));
         }
 
-        if (xs.Count == 0 || ys.Count == 0)
+        return points.Count > 0;
+    }
+
+    private static bool TryGetCropRect(IReadOnlyList<DrawingPointF> points, int imageW, int imageH, out SixLabors.ImageSharp.Rectangle rect)
+    {
+        if (points.Count == 0)
         {
             rect = default;
             return false;
         }
 
-        var minX = Math.Max(0, (int)Math.Floor(xs.Min()));
-        var minY = Math.Max(0, (int)Math.Floor(ys.Min()));
-        var maxX = Math.Min(imageW - 1, (int)Math.Ceiling(xs.Max()));
-        var maxY = Math.Min(imageH - 1, (int)Math.Ceiling(ys.Max()));
+        var minX = Math.Max(0, (int)Math.Floor(points.Min(p => p.X)));
+        var minY = Math.Max(0, (int)Math.Floor(points.Min(p => p.Y)));
+        var maxX = Math.Min(imageW - 1, (int)Math.Ceiling(points.Max(p => p.X)));
+        var maxY = Math.Min(imageH - 1, (int)Math.Ceiling(points.Max(p => p.Y)));
 
         var width = maxX - minX + 1;
         var height = maxY - minY + 1;
@@ -298,6 +327,209 @@ public sealed class E2eToolsExecutor : ICommandExecutor
 
         rect = new SixLabors.ImageSharp.Rectangle(minX, minY, width, height);
         return true;
+    }
+
+    private static bool TryPerspectiveCrop(Image<Rgb24> source, IReadOnlyList<DrawingPointF> rawPoints, out Image<Rgb24> crop)
+    {
+        crop = default!;
+        if (rawPoints.Count != 4)
+        {
+            return false;
+        }
+
+        var (tl, tr, br, bl) = OrderQuad(rawPoints);
+        var widthTop = Distance(tl, tr);
+        var widthBottom = Distance(bl, br);
+        var heightLeft = Distance(tl, bl);
+        var heightRight = Distance(tr, br);
+        var targetW = (int)Math.Round(Math.Max(widthTop, widthBottom));
+        var targetH = (int)Math.Round(Math.Max(heightLeft, heightRight));
+        if (targetW < 4 || targetH < 4)
+        {
+            return false;
+        }
+
+        var dst = new[]
+        {
+            new DrawingPointF(0, 0),
+            new DrawingPointF(targetW - 1, 0),
+            new DrawingPointF(targetW - 1, targetH - 1),
+            new DrawingPointF(0, targetH - 1)
+        };
+
+        var src = new[] { tl, tr, br, bl };
+        if (!TrySolveHomography(dst, src, out var h))
+        {
+            return false;
+        }
+
+        var output = new Image<Rgb24>(targetW, targetH);
+        for (var y = 0; y < targetH; y++)
+        {
+            for (var x = 0; x < targetW; x++)
+            {
+                var denom = h[6] * x + h[7] * y + 1.0;
+                if (Math.Abs(denom) < 1e-6)
+                {
+                    output[x, y] = default;
+                    continue;
+                }
+
+                var sx = (h[0] * x + h[1] * y + h[2]) / denom;
+                var sy = (h[3] * x + h[4] * y + h[5]) / denom;
+                output[x, y] = SampleBilinear(source, sx, sy);
+            }
+        }
+
+        crop = output;
+        return true;
+    }
+
+    private static (DrawingPointF Tl, DrawingPointF Tr, DrawingPointF Br, DrawingPointF Bl) OrderQuad(IReadOnlyList<DrawingPointF> points)
+    {
+        var sorted = points
+            .OrderBy(p => p.Y)
+            .ThenBy(p => p.X)
+            .Take(4)
+            .ToArray();
+        var top = sorted.Take(2).OrderBy(p => p.X).ToArray();
+        var bottom = sorted.Skip(2).OrderBy(p => p.X).ToArray();
+        var tl = top[0];
+        var tr = top[1];
+        var bl = bottom[0];
+        var br = bottom[1];
+        return (tl, tr, br, bl);
+    }
+
+    private static double Distance(DrawingPointF a, DrawingPointF b)
+    {
+        var dx = a.X - b.X;
+        var dy = a.Y - b.Y;
+        return Math.Sqrt(dx * dx + dy * dy);
+    }
+
+    private static bool TrySolveHomography(IReadOnlyList<DrawingPointF> from, IReadOnlyList<DrawingPointF> to, out double[] h)
+    {
+        h = new double[8];
+        if (from.Count != 4 || to.Count != 4)
+        {
+            return false;
+        }
+
+        var a = new double[8, 9];
+        for (var i = 0; i < 4; i++)
+        {
+            var x = from[i].X;
+            var y = from[i].Y;
+            var u = to[i].X;
+            var v = to[i].Y;
+            var r = i * 2;
+
+            a[r, 0] = x;
+            a[r, 1] = y;
+            a[r, 2] = 1;
+            a[r, 6] = -u * x;
+            a[r, 7] = -u * y;
+            a[r, 8] = u;
+
+            a[r + 1, 3] = x;
+            a[r + 1, 4] = y;
+            a[r + 1, 5] = 1;
+            a[r + 1, 6] = -v * x;
+            a[r + 1, 7] = -v * y;
+            a[r + 1, 8] = v;
+        }
+
+        for (var col = 0; col < 8; col++)
+        {
+            var pivot = col;
+            var maxAbs = Math.Abs(a[pivot, col]);
+            for (var row = col + 1; row < 8; row++)
+            {
+                var v = Math.Abs(a[row, col]);
+                if (v > maxAbs)
+                {
+                    pivot = row;
+                    maxAbs = v;
+                }
+            }
+
+            if (maxAbs < 1e-8)
+            {
+                return false;
+            }
+
+            if (pivot != col)
+            {
+                for (var c = col; c <= 8; c++)
+                {
+                    (a[col, c], a[pivot, c]) = (a[pivot, c], a[col, c]);
+                }
+            }
+
+            var divisor = a[col, col];
+            for (var c = col; c <= 8; c++)
+            {
+                a[col, c] /= divisor;
+            }
+
+            for (var row = 0; row < 8; row++)
+            {
+                if (row == col)
+                {
+                    continue;
+                }
+
+                var factor = a[row, col];
+                if (Math.Abs(factor) < 1e-12)
+                {
+                    continue;
+                }
+
+                for (var c = col; c <= 8; c++)
+                {
+                    a[row, c] -= factor * a[col, c];
+                }
+            }
+        }
+
+        for (var i = 0; i < 8; i++)
+        {
+            h[i] = a[i, 8];
+        }
+
+        return true;
+    }
+
+    private static Rgb24 SampleBilinear(Image<Rgb24> source, double x, double y)
+    {
+        x = Math.Clamp(x, 0, source.Width - 1);
+        y = Math.Clamp(y, 0, source.Height - 1);
+
+        var x0 = (int)Math.Floor(x);
+        var y0 = (int)Math.Floor(y);
+        var x1 = Math.Min(x0 + 1, source.Width - 1);
+        var y1 = Math.Min(y0 + 1, source.Height - 1);
+        var dx = x - x0;
+        var dy = y - y0;
+
+        var c00 = source[x0, y0];
+        var c10 = source[x1, y0];
+        var c01 = source[x0, y1];
+        var c11 = source[x1, y1];
+
+        static byte Blend(byte a, byte b, byte c, byte d, double dx, double dy)
+        {
+            var top = a + (b - a) * dx;
+            var bottom = c + (d - c) * dx;
+            var value = top + (bottom - top) * dy;
+            return (byte)Math.Clamp((int)Math.Round(value), 0, 255);
+        }
+
+        return new Rgb24(
+            Blend(c00.R, c10.R, c01.R, c11.R, dx, dy),
+            Blend(c00.G, c10.G, c01.G, c11.G, dx, dy),
+            Blend(c00.B, c10.B, c01.B, c11.B, dx, dy));
     }
 
     private static string SanitizeRecText(string text)

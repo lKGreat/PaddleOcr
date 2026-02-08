@@ -68,6 +68,27 @@ public sealed class CommandLineTests
     }
 
     [Fact]
+    public void Parse_Should_Read_Doctor_VerifyRecPaddle_Subcommand()
+    {
+        var cmd = CommandLine.Parse(["doctor", "verify-rec-paddle", "--model_dir", "./m", "--python_exe", "python"]);
+        cmd.Root.Should().Be("doctor");
+        cmd.Sub.Should().Be("verify-rec-paddle");
+        cmd.Options["--model_dir"].Should().Be("./m");
+        cmd.Options["--python_exe"].Should().Be("python");
+    }
+
+    [Fact]
+    public void Parse_Should_Read_Doctor_TrainDevice_Subcommand()
+    {
+        var cmd = CommandLine.Parse(["doctor", "train-device", "-c", "cfg.yml", "--device", "cuda", "--use_amp", "true"]);
+        cmd.Root.Should().Be("doctor");
+        cmd.Sub.Should().Be("train-device");
+        cmd.ConfigPath.Should().Be("cfg.yml");
+        cmd.Options["--device"].Should().Be("cuda");
+        cmd.Options["--use_amp"].Should().Be("true");
+    }
+
+    [Fact]
     public void Parse_Should_Read_Benchmark_Subcommand()
     {
         var cmd = CommandLine.Parse(["benchmark", "run", "--scenario", "infer:system", "--iterations", "20"]);

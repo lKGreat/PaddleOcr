@@ -1,0 +1,44 @@
+Global:
+  device: cuda
+  use_amp: true
+  epoch_num: 20
+  save_model_dir: ./output/rec_icdar2015_cuda_boost
+  save_epoch_step: 2
+  print_batch_step: 20
+  eval_batch_step: [0, 500]
+  cal_metric_during_train: true
+  character_dict_path: assets/dicts/ic15_dict.txt
+  max_text_length: 32
+  use_space_char: false
+  seed: 1024
+  deterministic: true
+
+Optimizer:
+  lr:
+    learning_rate: 0.001
+
+Architecture:
+  model_type: rec
+  algorithm: SVTR_LCNet
+
+Train:
+  dataset:
+    data_dir: train_data/rec_icdar2015
+    label_file_list:
+      - train_data/rec_icdar2015/train_list.txt
+    transforms:
+      - RecResizeImg:
+          image_shape: [3, 48, 320]
+  loader:
+    batch_size_per_card: 128
+
+Eval:
+  dataset:
+    data_dir: train_data/rec_icdar2015
+    label_file_list:
+      - train_data/rec_icdar2015/val_list.txt
+    transforms:
+      - RecResizeImg:
+          image_shape: [3, 48, 320]
+  loader:
+    batch_size_per_card: 128

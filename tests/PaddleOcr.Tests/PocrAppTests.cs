@@ -348,6 +348,63 @@ public sealed class PocrAppTests
     }
 
     [Fact]
+    public async Task RunAsync_DoctorTrainDevice_Should_Fail_Without_Config()
+    {
+        var app = new PocrApp(
+            NullLogger.Instance,
+            new ConfigLoader(),
+            new ProbeExecutor("training"),
+            new ProbeExecutor("inference"),
+            new ProbeExecutor("export"),
+            new ProbeExecutor("service"),
+            new ProbeExecutor("e2e"),
+            new ProbeExecutor("benchmark"),
+            new ProbeExecutor("plugin"));
+
+        var code = await app.RunAsync(["doctor", "train-device"]);
+        code.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task RunAsync_DoctorTrainDevice_Should_Pass_For_Cpu_Config()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "pocr_train_device_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var cfg = Path.Combine(dir, "cpu.yml");
+            await File.WriteAllTextAsync(cfg,
+                """
+                Global:
+                  device: cpu
+                Architecture:
+                  model_type: rec
+                """);
+
+            var app = new PocrApp(
+                NullLogger.Instance,
+                new ConfigLoader(),
+                new ProbeExecutor("training"),
+                new ProbeExecutor("inference"),
+                new ProbeExecutor("export"),
+                new ProbeExecutor("service"),
+                new ProbeExecutor("e2e"),
+                new ProbeExecutor("benchmark"),
+                new ProbeExecutor("plugin"));
+
+            var code = await app.RunAsync(["doctor", "train-device", "-c", cfg]);
+            code.Should().Be(0);
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+            {
+                Directory.Delete(dir, true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task RunAsync_DoctorTrainDetReady_Should_Pass_For_TinyDet_Config()
     {
         var root = FindRepoRoot();
@@ -451,6 +508,54 @@ public sealed class PocrAppTests
 
         var code = await app.RunAsync(["doctor", "det-parity", "-c", cfg]);
         code.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task RunAsync_DoctorVerifyRecPaddle_Should_Fail_Without_ModelDir()
+    {
+        var app = new PocrApp(
+            NullLogger.Instance,
+            new ConfigLoader(),
+            new ProbeExecutor("training"),
+            new ProbeExecutor("inference"),
+            new ProbeExecutor("export"),
+            new ProbeExecutor("service"),
+            new ProbeExecutor("e2e"),
+            new ProbeExecutor("benchmark"),
+            new ProbeExecutor("plugin"));
+
+        var code = await app.RunAsync(["doctor", "verify-rec-paddle"]);
+        code.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task RunAsync_DoctorVerifyRecPaddle_Should_Fail_When_Model_Files_Missing()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "pocr_verify_rec_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var app = new PocrApp(
+                NullLogger.Instance,
+                new ConfigLoader(),
+                new ProbeExecutor("training"),
+                new ProbeExecutor("inference"),
+                new ProbeExecutor("export"),
+                new ProbeExecutor("service"),
+                new ProbeExecutor("e2e"),
+                new ProbeExecutor("benchmark"),
+                new ProbeExecutor("plugin"));
+
+            var code = await app.RunAsync(["doctor", "verify-rec-paddle", "--model_dir", dir]);
+            code.Should().Be(2);
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+            {
+                Directory.Delete(dir, true);
+            }
+        }
     }
 
     private static string FindRepoRoot()

@@ -30,11 +30,20 @@ internal sealed class TrainingConfigView
     public bool ResumeTraining => GetBool("Global.resume_training", true);
     public int Seed => GetInt("Global.seed", 1024);
     public bool Deterministic => GetBool("Global.deterministic", true);
-    public string Device => GetString("Global.device", "cpu").Trim().ToLowerInvariant();
+    public string DeviceRaw => (GetStringOrNull("Global.device") ?? string.Empty).Trim().ToLowerInvariant();
+    public bool UseGpu => GetBool("Global.use_gpu", false);
+    public string Device => ResolveDeviceString();
+    public bool UseAmp => ResolveUseAmp();
     public float MinImproveDelta => GetFloat("Global.min_improve_delta", 1e-4f);
     public bool NanGuard => GetBool("Global.nan_guard", true);
     public string SaveModelDir => ResolvePath(GetString("Global.save_model_dir", "./output/cls"));
     public string? Checkpoints => ResolvePathOrNull(GetStringOrNull("Global.checkpoints"));
+    public string? PretrainedModel => ResolvePathOrNull(GetStringOrNull("Global.pretrained_model"));
+    public string? TeacherModelDir => ResolvePathOrNull(GetStringOrNull("Global.teacher_model_dir"));
+    public string? TeacherPaddleLibDir => ResolvePathOrNull(GetStringOrNull("Global.teacher_paddle_lib_dir"));
+    public float DistillWeight => Clamp(GetFloat("Global.distill_weight", 0f), 0f, 1f);
+    public float DistillTemperature => Math.Max(1e-3f, GetFloat("Global.distill_temperature", 1f));
+    public bool StrictTeacherStudent => GetBool("Global.strict_teacher_student", true);
 
     public string TrainLabelFile => ResolvePath(GetFirstString("Train.dataset.label_file_list"));
     public string EvalLabelFile => ResolvePath(GetFirstString("Eval.dataset.label_file_list"));
@@ -269,6 +278,27 @@ internal sealed class TrainingConfigView
     private bool GetBool(string path, bool fallback)
     {
         return bool.TryParse(GetByPath(path)?.ToString(), out var v) ? v : fallback;
+    }
+
+    private string ResolveDeviceString()
+    {
+        if (!string.IsNullOrWhiteSpace(DeviceRaw))
+        {
+            return DeviceRaw;
+        }
+
+        return UseGpu ? "cuda" : "cpu";
+    }
+
+    private bool ResolveUseAmp()
+    {
+        var raw = GetStringOrNull("Global.use_amp");
+        if (!string.IsNullOrWhiteSpace(raw) && bool.TryParse(raw, out var explicitFlag))
+        {
+            return explicitFlag;
+        }
+
+        return Device.StartsWith("cuda", StringComparison.OrdinalIgnoreCase);
     }
 
     private static float Clamp(float value, float min, float max)

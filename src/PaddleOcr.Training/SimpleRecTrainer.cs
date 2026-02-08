@@ -1,5 +1,6 @@
 ﻿using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using PaddleOcr.Training.Runtime;
 using TorchSharp;
 using static TorchSharp.torch;
 using static TorchSharp.torch.nn;
@@ -23,19 +24,21 @@ internal sealed class SimpleRecTrainer
         var trainSet = new SimpleRecDataset(cfg.TrainLabelFile, cfg.DataDir, shape.H, shape.W, cfg.MaxTextLength, charToId);
         var evalSet = new SimpleRecDataset(cfg.EvalLabelFile, cfg.EvalDataDir, shape.H, shape.W, cfg.MaxTextLength, charToId);
 
-        var dev = cuda.is_available() ? CUDA : CPU;
+        var runtime = TrainingDeviceResolver.Resolve(cfg);
+        var dev = runtime.Device;
         _logger.LogInformation("Training(rec) device: {Device}", dev.type);
+        _logger.LogInformation("runtime: requested={Requested}, cuda={Cuda}, amp={Amp}, reason={Reason}", runtime.RequestedDevice, runtime.UseCuda, runtime.UseAmp, runtime.Reason);
         _logger.LogInformation("Train samples: {TrainCount}, Eval samples: {EvalCount}, Vocab: {Vocab}", trainSet.Count, evalSet.Count, vocab.Count);
 
         using var model = new SimpleRecNet(vocab.Count + 1, cfg.MaxTextLength);
         model.to(dev);
         var lr = cfg.LearningRate;
-        var optimizer = torch.optim.Adam(model.parameters(), lr: lr);
         var resumeCkpt = cfg.ResumeTraining ? ResolveEvalCheckpoint(cfg) : null;
         if (!string.IsNullOrWhiteSpace(resumeCkpt))
         {
             TryLoadCheckpoint(model, resumeCkpt);
         }
+        var optimizer = torch.optim.Adam(model.parameters(), lr: lr);
 
         var rng = new Random(1024);
         float bestAcc = -1f;
@@ -112,7 +115,8 @@ internal sealed class SimpleRecTrainer
         var (charToId, vocab) = SimpleRecDataset.LoadDictionary(cfg.RecCharDictPath, cfg.UseSpaceChar);
         var evalSet = new SimpleRecDataset(cfg.EvalLabelFile, cfg.EvalDataDir, shape.H, shape.W, cfg.MaxTextLength, charToId);
 
-        var dev = cuda.is_available() ? CUDA : CPU;
+        var runtime = TrainingDeviceResolver.Resolve(cfg);
+        var dev = runtime.Device;
         using var model = new SimpleRecNet(vocab.Count + 1, cfg.MaxTextLength);
         model.to(dev);
 
@@ -251,6 +255,11 @@ internal sealed class SimpleRecTrainer
         if (!string.IsNullOrWhiteSpace(cfg.Checkpoints))
         {
             return cfg.Checkpoints;
+        }
+
+        if (!string.IsNullOrWhiteSpace(cfg.PretrainedModel))
+        {
+            return cfg.PretrainedModel;
         }
 
         var best = Path.Combine(cfg.SaveModelDir, "best.pt");

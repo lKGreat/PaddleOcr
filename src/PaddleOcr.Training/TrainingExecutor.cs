@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using PaddleOcr.Core.Cli;
 using PaddleOcr.Core.Errors;
+using PaddleOcr.Training.Runtime;
 
 namespace PaddleOcr.Training;
 
@@ -29,6 +30,15 @@ public sealed class TrainingExecutor : ICommandExecutor
         context.Logger.LogInformation("Override count: {Count}", context.OverrideOptions.Count);
         try
         {
+            var runtime = TrainingDeviceResolver.Resolve(cfg);
+            context.Logger.LogInformation(
+                "Training runtime: requested={Requested}, device={Device}, cuda={Cuda}, amp={Amp}, reason={Reason}",
+                runtime.RequestedDevice,
+                runtime.Device.type,
+                runtime.UseCuda,
+                runtime.UseAmp,
+                runtime.Reason);
+
             if (string.Equals(cfg.ModelType, "cls", StringComparison.OrdinalIgnoreCase))
             {
                 var trainer = new SimpleClsTrainer(context.Logger);

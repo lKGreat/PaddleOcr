@@ -1,5 +1,6 @@
 ﻿using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using PaddleOcr.Training.Runtime;
 using TorchSharp;
 using static TorchSharp.torch;
 using static TorchSharp.torch.nn;
@@ -22,19 +23,21 @@ internal sealed class SimpleClsTrainer
         var evalSet = new SimpleClsDataset(cfg.EvalLabelFile, cfg.EvalDataDir, shape.H, shape.W);
         var numClasses = Math.Max(2, EstimateNumClasses(trainSet, cfg.BatchSize));
 
-        var dev = cuda.is_available() ? CUDA : CPU;
+        var runtime = TrainingDeviceResolver.Resolve(cfg);
+        var dev = runtime.Device;
         _logger.LogInformation("Training device: {Device}", dev.type);
+        _logger.LogInformation("runtime: requested={Requested}, cuda={Cuda}, amp={Amp}, reason={Reason}", runtime.RequestedDevice, runtime.UseCuda, runtime.UseAmp, runtime.Reason);
         _logger.LogInformation("Train samples: {TrainCount}, Eval samples: {EvalCount}", trainSet.Count, evalSet.Count);
 
         using var model = new SimpleClsNet(numClasses);
         model.to(dev);
         var lr = cfg.LearningRate;
-        var optimizer = torch.optim.Adam(model.parameters(), lr: lr);
         var resumeCkpt = cfg.ResumeTraining ? ResolveEvalCheckpoint(cfg) : null;
         if (!string.IsNullOrWhiteSpace(resumeCkpt))
         {
             TryLoadCheckpoint(model, resumeCkpt);
         }
+        var optimizer = torch.optim.Adam(model.parameters(), lr: lr);
 
         var rng = new Random(1024);
         float bestAcc = -1f;
@@ -114,7 +117,8 @@ internal sealed class SimpleClsTrainer
         var evalSet = new SimpleClsDataset(cfg.EvalLabelFile, cfg.EvalDataDir, shape.H, shape.W);
         var numClasses = 2;
 
-        var dev = cuda.is_available() ? CUDA : CPU;
+        var runtime = TrainingDeviceResolver.Resolve(cfg);
+        var dev = runtime.Device;
         using var model = new SimpleClsNet(numClasses);
         model.to(dev);
 
@@ -206,6 +210,11 @@ internal sealed class SimpleClsTrainer
         if (!string.IsNullOrWhiteSpace(cfg.Checkpoints))
         {
             return cfg.Checkpoints;
+        }
+
+        if (!string.IsNullOrWhiteSpace(cfg.PretrainedModel))
+        {
+            return cfg.PretrainedModel;
         }
 
         var best = Path.Combine(cfg.SaveModelDir, "best.pt");

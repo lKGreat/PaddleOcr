@@ -4,6 +4,7 @@ using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using PaddleOcr.Data;
 using PaddleOcr.Data.LabelEncoders;
+using PaddleOcr.Training.Runtime;
 using PaddleOcr.Training.Rec.Losses;
 using PaddleOcr.Training.Rec.Schedulers;
 using TorchSharp;
@@ -62,8 +63,10 @@ internal sealed class ConfigDrivenRecTrainer
             enableAugmentation: false,
             useMultiScale: false);
 
-        var dev = ResolveDevice(cfg);
+        var runtime = TrainingDeviceResolver.Resolve(cfg);
+        var dev = runtime.Device;
         _logger.LogInformation("Training(rec) device: {Device}", dev.type);
+        _logger.LogInformation("runtime: requested={Requested}, cuda={Cuda}, amp={Amp}, reason={Reason}", runtime.RequestedDevice, runtime.UseCuda, runtime.UseAmp, runtime.Reason);
         _logger.LogInformation("Train samples: {TrainCount}, Eval samples: {EvalCount}, Vocab: {Vocab}", trainSet.Count, evalSet.Count, ctcEncoder.NumClasses);
 
         var model = BuildModel(cfg, ctcEncoder.NumClasses, gtcEncodeType);
@@ -74,7 +77,7 @@ internal sealed class ConfigDrivenRecTrainer
         var lossFn = BuildLoss(cfg);
 
         var ckptManager = new CheckpointManager(_logger);
-        var ampHelper = cfg.Device.Contains("cuda", StringComparison.OrdinalIgnoreCase) ? new AmpTrainingHelper(dev) : null;
+        var ampHelper = runtime.UseAmp ? new AmpTrainingHelper(dev, enabled: true) : null;
         var modelAverager = new ModelAverager();
         var gradAccumulator = new GradientUtils.GradientAccumulator(GetGradAccumulationSteps(cfg));
 
@@ -376,7 +379,8 @@ internal sealed class ConfigDrivenRecTrainer
             resizeStrategy,
             enableAugmentation: false);
 
-        var dev = ResolveDevice(cfg);
+        var runtime = TrainingDeviceResolver.Resolve(cfg);
+        var dev = runtime.Device;
         var model = BuildModel(cfg, ctcEncoder.NumClasses, gtcEncodeType);
         model.to(dev);
 
@@ -674,6 +678,11 @@ internal sealed class ConfigDrivenRecTrainer
             return cfg.Checkpoints;
         }
 
+        if (!string.IsNullOrWhiteSpace(cfg.PretrainedModel))
+        {
+            return cfg.PretrainedModel;
+        }
+
         var best = Path.Combine(cfg.SaveModelDir, "best.pt");
         if (File.Exists(best))
         {
@@ -792,16 +801,6 @@ internal sealed class ConfigDrivenRecTrainer
             var preview = new string(missing.Take(32).ToArray());
             logger.LogWarning("rec charset missing {Count} chars from labels. example: {Chars}", missing.Count, preview);
         }
-    }
-
-    private static Device ResolveDevice(TrainingConfigView cfg)
-    {
-        if (cfg.Device.Equals("cpu", StringComparison.OrdinalIgnoreCase))
-        {
-            return CPU;
-        }
-
-        return cuda.is_available() ? CUDA : CPU;
     }
 
     private static void ApplyLearningRate(Optimizer optimizer, double lr)

@@ -2,7 +2,11 @@ using Microsoft.Extensions.Logging;
 using PaddleOcr.Config;
 using PaddleOcr.Core.Cli;
 using PaddleOcr.Core.Errors;
+using PaddleOcr.Training.Runtime;
+using System.Diagnostics;
 using System.Text.Json;
+using TorchSharp;
+using static TorchSharp.torch;
 
 namespace PaddleOcr.Tools;
 
@@ -196,12 +200,22 @@ public sealed class PocrApp
             return Task.FromResult(RunDoctorTrainDetReady(context));
         }
 
+        if (string.Equals(parsed.Sub, "train-device", StringComparison.OrdinalIgnoreCase))
+        {
+            return Task.FromResult(RunDoctorTrainDevice(context));
+        }
+
         if (string.Equals(parsed.Sub, "det-parity", StringComparison.OrdinalIgnoreCase))
         {
             return Task.FromResult(RunDoctorDetParity(context));
         }
 
-        return Task.FromResult(CommandResult.Fail("doctor supports: check-models | parity-table-kie | train-det-ready | det-parity"));
+        if (string.Equals(parsed.Sub, "verify-rec-paddle", StringComparison.OrdinalIgnoreCase))
+        {
+            return Task.FromResult(RunDoctorVerifyRecPaddle(context));
+        }
+
+        return Task.FromResult(CommandResult.Fail("doctor supports: check-models | parity-table-kie | train-det-ready | train-device | det-parity | verify-rec-paddle"));
     }
 
     private static void ValidateModelPath(PaddleOcr.Core.Cli.ExecutionContext context, string optionKey, string configPath, ICollection<string> errors)
@@ -440,6 +454,130 @@ public sealed class PocrApp
         return CommandResult.Ok(summary + "\n" + string.Join('\n', warnings.Select(x => "warn: " + x)));
     }
 
+    private static CommandResult RunDoctorTrainDevice(PaddleOcr.Core.Cli.ExecutionContext context)
+    {
+        if (string.IsNullOrWhiteSpace(context.ConfigPath))
+        {
+            return CommandResult.Fail("doctor train-device requires -c/--config");
+        }
+
+        try
+        {
+            var device = (GetConfigValue(context.Config, "Global.device") ?? string.Empty).Trim().ToLowerInvariant();
+            var useGpu = bool.TryParse(GetConfigValue(context.Config, "Global.use_gpu"), out var ug) && ug;
+            var useAmpRaw = GetConfigValue(context.Config, "Global.use_amp");
+            var useAmp = !string.IsNullOrWhiteSpace(useAmpRaw) && bool.TryParse(useAmpRaw, out var ua)
+                ? ua
+                : (useGpu || device.StartsWith("cuda", StringComparison.OrdinalIgnoreCase));
+            var resolved = TrainingDeviceResolver.Resolve(
+                device,
+                useGpu,
+                useAmp,
+                () => new CudaRuntimeInfo(cuda.is_available(), cuda.is_available() ? cuda.device_count() : 0));
+            var cudaAvailable = cuda.is_available();
+            var cudaCount = cudaAvailable ? cuda.device_count() : 0;
+            return CommandResult.Ok(
+                $"doctor train-device passed: requested={resolved.RequestedDevice}, resolved={resolved.Device.type}, " +
+                $"cuda_available={cudaAvailable}, cuda_count={cudaCount}, amp={resolved.UseAmp}, reason={resolved.Reason}");
+        }
+        catch (Exception ex)
+        {
+            return CommandResult.Fail($"doctor train-device failed: {ex.Message}");
+        }
+    }
+
+    private static CommandResult RunDoctorVerifyRecPaddle(PaddleOcr.Core.Cli.ExecutionContext context)
+    {
+        if (!context.Options.TryGetValue("--model_dir", out var modelDir) || string.IsNullOrWhiteSpace(modelDir))
+        {
+            return CommandResult.Fail("doctor verify-rec-paddle requires --model_dir");
+        }
+
+        var modelFile = Path.Combine(modelDir, "inference.json");
+        var paramsFile = Path.Combine(modelDir, "inference.pdiparams");
+        if (!File.Exists(modelFile) || !File.Exists(paramsFile))
+        {
+            return CommandResult.Fail($"doctor verify-rec-paddle expects inference.json + inference.pdiparams in: {modelDir}");
+        }
+
+        var repoRoot = FindRepoRoot();
+        var scriptPath = Path.Combine(repoRoot, "scripts", "verify_rec_paddle.py");
+        if (!File.Exists(scriptPath))
+        {
+            return CommandResult.Fail($"doctor verify-rec-paddle script not found: {scriptPath}");
+        }
+
+        var pythonExe = context.Options.TryGetValue("--python_exe", out var py) && !string.IsNullOrWhiteSpace(py) ? py : "python";
+        var imagePath = context.Options.TryGetValue("--image_path", out var img) ? img : null;
+        var saveJson = context.Options.TryGetValue("--save_json", out var json) ? json : null;
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = pythonExe,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+        psi.ArgumentList.Add(scriptPath);
+        psi.ArgumentList.Add("--model_dir");
+        psi.ArgumentList.Add(modelDir);
+
+        if (!string.IsNullOrWhiteSpace(imagePath))
+        {
+            psi.ArgumentList.Add("--image_path");
+            psi.ArgumentList.Add(imagePath);
+        }
+
+        if (!string.IsNullOrWhiteSpace(saveJson))
+        {
+            psi.ArgumentList.Add("--save_json");
+            psi.ArgumentList.Add(saveJson);
+        }
+
+        try
+        {
+            using var proc = Process.Start(psi);
+            if (proc is null)
+            {
+                return CommandResult.Fail($"doctor verify-rec-paddle failed to start process: {pythonExe}");
+            }
+
+            var stdout = proc.StandardOutput.ReadToEnd();
+            var stderr = proc.StandardError.ReadToEnd();
+            proc.WaitForExit();
+            if (proc.ExitCode != 0)
+            {
+                var err = string.IsNullOrWhiteSpace(stderr) ? stdout : stderr;
+                return CommandResult.Fail($"doctor verify-rec-paddle failed: {err.Trim()}");
+            }
+
+            var preview = stdout.Trim();
+            return string.IsNullOrWhiteSpace(preview)
+                ? CommandResult.Ok("doctor verify-rec-paddle passed")
+                : CommandResult.Ok($"doctor verify-rec-paddle passed:\n{preview}");
+        }
+        catch (Exception ex)
+        {
+            return CommandResult.Fail($"doctor verify-rec-paddle failed: {ex.Message}");
+        }
+    }
+
+    private static string FindRepoRoot()
+    {
+        var dir = new DirectoryInfo(Directory.GetCurrentDirectory());
+        while (dir is not null)
+        {
+            if (File.Exists(Path.Combine(dir.FullName, "PaddleOcr.slnx")))
+            {
+                return dir.FullName;
+            }
+
+            dir = dir.Parent;
+        }
+
+        return Directory.GetCurrentDirectory();
+    }
+
     private static string? GetFirstListItem(IReadOnlyDictionary<string, object?> cfg, string path)
     {
         var value = GetConfigNode(cfg, path);
@@ -660,6 +798,8 @@ public sealed class PocrApp
             ConfigMerger.MergeInPlace(cfg, parsedOverrides);
         }
 
+        ApplyTrainingRuntimeOptions(parsed.Root, cfg, parsed.Options);
+
         return new PaddleOcr.Core.Cli.ExecutionContext(
             _logger,
             parsed.RawArgs.ToArray(),
@@ -667,6 +807,40 @@ public sealed class PocrApp
             cfg,
             parsed.Options,
             parsed.Overrides);
+    }
+
+    private static void ApplyTrainingRuntimeOptions(string root, Dictionary<string, object?> cfg, IReadOnlyDictionary<string, string> options)
+    {
+        if (!root.Equals("train", StringComparison.OrdinalIgnoreCase) &&
+            !root.Equals("eval", StringComparison.OrdinalIgnoreCase) &&
+            !root.Equals("doctor", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var overrides = new List<string>();
+        if (options.TryGetValue("--device", out var device) && !string.IsNullOrWhiteSpace(device))
+        {
+            overrides.Add($"Global.device={device}");
+        }
+
+        if (options.TryGetValue("--use_gpu", out var useGpu) && !string.IsNullOrWhiteSpace(useGpu))
+        {
+            overrides.Add($"Global.use_gpu={useGpu}");
+        }
+
+        if (options.TryGetValue("--use_amp", out var useAmp) && !string.IsNullOrWhiteSpace(useAmp))
+        {
+            overrides.Add($"Global.use_amp={useAmp}");
+        }
+
+        if (overrides.Count == 0)
+        {
+            return;
+        }
+
+        var parsedOverrides = OverrideParser.Parse(overrides);
+        ConfigMerger.MergeInPlace(cfg, parsedOverrides);
     }
 }
 

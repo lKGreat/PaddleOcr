@@ -137,6 +137,64 @@ public sealed class E2eToolsExecutorTests
         }
     }
 
+    [Fact]
+    public async Task PrepareRecDet_Should_Use_Quad_Perspective_Crop_For_Four_Points()
+    {
+        var temp = CreateTempDir();
+        try
+        {
+            var imagesRoot = Path.Combine(temp, "images");
+            Directory.CreateDirectory(imagesRoot);
+            var imgPath = Path.Combine(imagesRoot, "a.jpg");
+            using (var img = new Image<Rgb24>(80, 80))
+            {
+                img.SaveAsJpeg(imgPath);
+            }
+
+            var labelPath = Path.Combine(temp, "det_labels.txt");
+            await File.WriteAllTextAsync(
+                labelPath,
+                "a.jpg\t[{\"transcription\":\"abc\",\"points\":[[30,0],[60,30],[30,60],[0,30]]}]");
+
+            var outDir = Path.Combine(temp, "rec_data");
+            var executor = new E2eToolsExecutor();
+            var context = new PaddleOcr.Core.Cli.ExecutionContext(
+                NullLogger.Instance,
+                ["e2e", "prepare-rec-det"],
+                null,
+                new Dictionary<string, object?>(),
+                new Dictionary<string, string>
+                {
+                    ["--label_path"] = labelPath,
+                    ["--image_root"] = imagesRoot,
+                    ["--output_dir"] = outDir,
+                    ["--train_ratio"] = "0.9",
+                    ["--seed"] = "7"
+                },
+                []);
+
+            var result = await executor.ExecuteAsync("prepare-rec-det", context);
+
+            result.Success.Should().BeTrue();
+            var merged = (await File.ReadAllLinesAsync(Path.Combine(outDir, "train_list.txt")))
+                .Concat(await File.ReadAllLinesAsync(Path.Combine(outDir, "val_list.txt")))
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToArray();
+            merged.Should().HaveCount(1);
+
+            var relPath = merged[0].Split('\t', 2)[0];
+            var cropPath = Path.Combine(outDir, relPath.Replace('/', Path.DirectorySeparatorChar));
+            File.Exists(cropPath).Should().BeTrue();
+            using var crop = Image.Load<Rgb24>(cropPath);
+            crop.Width.Should().BeInRange(35, 50);
+            crop.Height.Should().BeInRange(35, 50);
+        }
+        finally
+        {
+            SafeDelete(temp);
+        }
+    }
+
     private static string CreateTempDir()
     {
         var path = Path.Combine(Path.GetTempPath(), "pocr-tests-" + Guid.NewGuid().ToString("N"));

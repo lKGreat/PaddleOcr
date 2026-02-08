@@ -100,6 +100,7 @@ public static class CommandLine
                  export-center -c <config> [-o K=V ...]
                  infer <det|rec|cls|e2e|kie|kie-ser|kie-re|table|sr|system> [-c <config>] [options]
                    det options: [--det_algorithm DB|DB++|EAST|SAST|PSE|FCE|CT] [--det_db_thresh F] [--det_db_box_thresh F] [--det_db_unclip_ratio F] [--det_db_score_mode fast|slow] [--det_max_candidates N] [--det_box_type quad|poly] [--det_limit_side_len N] [--det_limit_type max|min] [--use_dilation true|false] [--use_slice true|false] [--det_slice_merge_iou F] [--det_slice_min_bound_distance N] [--save_res_path <file>] [--det_gt_label <file>] [--det_eval_iou_thresh F] [--det_metrics_path <file>]
+                   rec options: [--runtime_backend onnx|paddle] [--use_onnx true|false] [--paddle_lib_dir <dir>]
                  convert json2pdmodel --json_model_dir <dir> --output_dir <dir> --config <yml>
                  convert check-json-model --json_model_dir <dir>
                  config check -c <config>
@@ -108,6 +109,8 @@ public static class CommandLine
                  doctor parity-table-kie -c <config> [--mode all|table|kie]
                  doctor det-parity -c <config>
                  doctor train-det-ready -c <config>
+                 doctor train-device -c <config> [--device <cpu|auto|cuda|cuda:N>] [--use_gpu true|false] [--use_amp true|false]
+                 doctor verify-rec-paddle --model_dir <dir> [--image_path <img>] [--python_exe <exe>] [--save_json <file>]
                  service test --server_url <url> --image_dir <dir> [--parallel N --timeout_ms MS --retries N --stress_rounds N --dump_failures true]
                  e2e <convert-label|eval|prepare-rec-det> [args]
                  benchmark run --scenario <infer:system|service:test|e2e:eval|export:export-onnx|train:train> [--profile smoke|balanced|stress] [--warmup N --iterations N --continue_on_error true --report_json <path>] [scenario options...]

@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using PaddleOcr.Training.Runtime;
 using TorchSharp;
 using static TorchSharp.torch;
 using static TorchSharp.torch.nn;
@@ -41,8 +42,10 @@ internal sealed class SimpleDetTrainer
             cfg.DetThreshMin,
             cfg.DetThreshMax);
 
-        var dev = ResolveDevice(cfg);
+        var runtime = TrainingDeviceResolver.Resolve(cfg);
+        var dev = runtime.Device;
         _logger.LogInformation("Training(det) device: {Device}", dev.type);
+        _logger.LogInformation("runtime: requested={Requested}, cuda={Cuda}, amp={Amp}, reason={Reason}", runtime.RequestedDevice, runtime.UseCuda, runtime.UseAmp, runtime.Reason);
         _logger.LogInformation("Train samples: {TrainCount}, Eval samples: {EvalCount}", trainSet.Count, evalSet.Count);
         _logger.LogInformation("deterministic={Deterministic}, seed={Seed}", cfg.Deterministic, cfg.Seed);
 
@@ -61,7 +64,6 @@ internal sealed class SimpleDetTrainer
         using var model = new SimpleDetNet();
         model.to(dev);
         var lr = cfg.LearningRate;
-        var optimizer = torch.optim.Adam(model.parameters(), lr: lr);
         var rng = new Random(cfg.Seed);
         var evalRng = new Random(cfg.Seed + 17);
         var resumeCkpt = cfg.ResumeTraining ? ResolveEvalCheckpoint(cfg) : null;
@@ -71,6 +73,7 @@ internal sealed class SimpleDetTrainer
             _logger.LogInformation("Loading checkpoint: {Path}", resumeCkpt);
             model.load(resumeCkpt);
         }
+        var optimizer = torch.optim.Adam(model.parameters(), lr: lr);
 
         float bestFscore = -1f;
         var epochsCompleted = 0;
@@ -216,7 +219,8 @@ internal sealed class SimpleDetTrainer
             cfg.DetShrinkRatio,
             cfg.DetThreshMin,
             cfg.DetThreshMax);
-        var dev = ResolveDevice(cfg);
+        var runtime = TrainingDeviceResolver.Resolve(cfg);
+        var dev = runtime.Device;
         using var model = new SimpleDetNet();
         model.to(dev);
 
@@ -286,26 +290,16 @@ internal sealed class SimpleDetTrainer
         return !float.IsNaN(value) && !float.IsInfinity(value);
     }
 
-    private static Device ResolveDevice(TrainingConfigView cfg)
-    {
-        if (cfg.Device.Equals("cpu", StringComparison.OrdinalIgnoreCase))
-        {
-            return CPU;
-        }
-
-        if (cfg.Device.Equals("auto", StringComparison.OrdinalIgnoreCase) && cuda.is_available())
-        {
-            return CUDA;
-        }
-
-        return CPU;
-    }
-
     private static string? ResolveEvalCheckpoint(TrainingConfigView cfg)
     {
         if (!string.IsNullOrWhiteSpace(cfg.Checkpoints))
         {
             return cfg.Checkpoints;
+        }
+
+        if (!string.IsNullOrWhiteSpace(cfg.PretrainedModel))
+        {
+            return cfg.PretrainedModel;
         }
 
         var best = Path.Combine(cfg.SaveModelDir, "best.pt");

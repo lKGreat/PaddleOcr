@@ -4,13 +4,14 @@
     <ProjectReference Include="..\PaddleOcr.Core\PaddleOcr.Core.csproj" />
     <ProjectReference Include="..\PaddleOcr.Config\PaddleOcr.Config.csproj" />
     <ProjectReference Include="..\PaddleOcr.Data\PaddleOcr.Data.csproj" />
+    <ProjectReference Include="..\PaddleOcr.Inference\PaddleOcr.Inference.csproj" />
     <ProjectReference Include="..\PaddleOcr.Models\PaddleOcr.Models.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
     <PackageReference Include="TorchSharp" Version="0.105.2" />
-    <PackageReference Include="TorchSharp-cpu" Version="0.105.2" />
+    <PackageReference Include="TorchSharp-cuda-windows" Version="0.105.2" />
   </ItemGroup>
 
   <PropertyGroup>
