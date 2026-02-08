@@ -221,6 +221,15 @@ internal sealed class ConfigDrivenRecTrainer
                     var smoothedLoss = recentLoss.Count == 0 ? lossVal : recentLoss.Average();
                     var stepMs = stepWatch.Elapsed.TotalMilliseconds;
                     stepWatch.Restart();
+                    float? blankRatio = null;
+                    if (ctcLogits.shape.Length >= 3)
+                    {
+                        using var stepPred = ctcLogits.argmax(2);
+                        using var blankMask = stepPred.eq(0);
+                        var blankCount = blankMask.to_type(ScalarType.Float32).mean().ToSingle();
+                        blankRatio = blankCount;
+                    }
+
                     AppendJsonLine(
                         tracePath,
                         new
@@ -233,17 +242,19 @@ internal sealed class ConfigDrivenRecTrainer
                             batch = batchData.Batch,
                             width = batchData.Width,
                             step_ms = stepMs,
+                            ctc_blank_ratio = blankRatio,
                             optimizer_step_count = optimizerStepCount,
                             non_zero_grad_steps = nonZeroGradSteps
                         });
                     _logger.LogInformation(
-                        "train step epoch={Epoch} step={Step} loss={Loss:F4} smooth_loss={Smooth:F4} lr={Lr:F6} step_ms={StepMs:F1}",
+                        "train step epoch={Epoch} step={Step} loss={Loss:F4} smooth_loss={Smooth:F4} lr={Lr:F6} step_ms={StepMs:F1} ctc_blank_ratio={BlankRatio}",
                         epoch,
                         globalStep,
                         lossVal,
                         smoothedLoss,
                         lrScheduler.CurrentLR,
-                        stepMs);
+                        stepMs,
+                        blankRatio is null ? "n/a" : $"{blankRatio.Value:F4}");
                 }
 
                 if (shouldUpdate || globalStep == 1)

@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using PaddleOcr.Training.Det.Losses;
 using PaddleOcr.Training.Runtime;
 using TorchSharp;
 using static TorchSharp.torch;
@@ -75,6 +76,15 @@ internal sealed class SimpleDetTrainer
         }
         var optimizer = torch.optim.Adam(model.parameters(), lr: lr);
 
+        // Initialize DBLoss with configured weights
+        using var dbLoss = new DBLoss(
+            alpha: cfg.DetShrinkLossWeight,
+            beta: cfg.DetThresholdLossWeight,
+            balanceLoss: true,
+            ohemRatio: 3f,
+            eps: 1e-6f);
+        dbLoss.to(dev);
+
         float bestFscore = -1f;
         var epochsCompleted = 0;
         var staleEpochs = 0;
@@ -96,18 +106,33 @@ internal sealed class SimpleDetTrainer
             model.train();
             var lossSum = 0f;
             var samples = 0;
-            foreach (var (images, shrinkMaps, thresholdMaps, batch) in trainSet.GetBatches(cfg.BatchSize, true, rng))
+            foreach (var (images, shrinkMaps, shrinkMasks, thresholdMaps, thresholdMasks, batch) in trainSet.GetBatches(cfg.BatchSize, true, rng))
             {
                 using var x = torch.tensor(images, dtype: ScalarType.Float32).reshape(batch, 3, size, size).to(dev);
-                using var shrinkGt = torch.tensor(shrinkMaps, dtype: ScalarType.Float32).reshape(batch, 1, size, size).to(dev);
-                using var thresholdGt = torch.tensor(thresholdMaps, dtype: ScalarType.Float32).reshape(batch, 1, size, size).to(dev);
+                using var gtShrinkMap = torch.tensor(shrinkMaps, dtype: ScalarType.Float32).reshape(batch, size, size).to(dev);
+                using var gtShrinkMask = torch.tensor(shrinkMasks, dtype: ScalarType.Float32).reshape(batch, size, size).to(dev);
+                using var gtThresholdMap = torch.tensor(thresholdMaps, dtype: ScalarType.Float32).reshape(batch, size, size).to(dev);
+                using var gtThresholdMask = torch.tensor(thresholdMasks, dtype: ScalarType.Float32).reshape(batch, size, size).to(dev);
+
                 optimizer.zero_grad();
-                using var pred = model.call(x);
-                using var shrinkPred = pred.narrow(1, 0, 1);
-                using var thresholdPred = pred.narrow(1, 1, 1);
-                using var shrinkLoss = functional.binary_cross_entropy_with_logits(shrinkPred, shrinkGt);
-                using var thresholdLoss = functional.l1_loss(thresholdPred.sigmoid(), thresholdGt);
-                using var loss = shrinkLoss * cfg.DetShrinkLossWeight + thresholdLoss * cfg.DetThresholdLossWeight;
+                using var pred = model.call(x);  // [B, 3, H, W]
+
+                // Prepare predictions and batch dictionaries for DBLoss
+                var predictions = new Dictionary<string, Tensor>
+                {
+                    ["maps"] = pred
+                };
+                var batchDict = new Dictionary<string, Tensor>
+                {
+                    ["shrink_map"] = gtShrinkMap,
+                    ["shrink_mask"] = gtShrinkMask,
+                    ["threshold_map"] = gtThresholdMap,
+                    ["threshold_mask"] = gtThresholdMask
+                };
+
+                // Compute loss using DBLoss
+                var losses = dbLoss.Forward(predictions, batchDict);
+                using var loss = losses["loss"];
                 var lossValue = loss.ToSingle();
                 if (cfg.NanGuard && !IsFinite(lossValue))
                 {
@@ -247,7 +272,7 @@ internal sealed class SimpleDetTrainer
         model.eval();
         var summary = new DetMatchSummary(0, 0, 0, 0f);
         using var noGrad = torch.no_grad();
-        foreach (var (images, shrinkMaps, _, batch) in evalSet.GetBatches(batchSize, false, evalRng))
+        foreach (var (images, shrinkMaps, _, _, _, batch) in evalSet.GetBatches(batchSize, false, evalRng))
         {
             using var x = torch.tensor(images, dtype: ScalarType.Float32).reshape(batch, 3, size, size).to(dev);
             using var predAll = model.call(x);

@@ -1,0 +1,97 @@
+Global:
+  device: cuda
+  use_amp: true
+  epoch_num: 30
+  save_model_dir: ./output/rec_ic15_overfit_128_ctc
+  save_epoch_step: 5
+  print_batch_step: 10
+  eval_batch_step: [0, 20]
+  cal_metric_during_train: true
+  calc_epoch_interval: 1
+  log_smooth_window: 20
+  save_batch_model: false
+  min_improve_delta: 0.00001
+  character_dict_path: assets/dicts/ic15_full_auto_dict.txt
+  max_text_length: 32
+  use_space_char: true
+  seed: 1024
+  deterministic: true
+
+Optimizer:
+  name: Adam
+  beta1: 0.9
+  beta2: 0.999
+  lr:
+    name: Exponential
+    learning_rate: 0.001
+    gamma: 1.0
+  regularizer:
+    name: L2
+    factor: 0.00003
+
+Architecture:
+  model_type: rec
+  algorithm: CRNN
+  Backbone:
+    name: MobileNetV3
+    model_name: small
+  Neck:
+    name: SequenceEncoder
+    encoder_type: rnn
+    hidden_size: 96
+  Head:
+    name: CTCHead
+    hidden_size: 96
+
+Loss:
+  name: CTCLoss
+
+Train:
+  dataset:
+    name: SimpleDataSet
+    data_dir: C:/Users/li/Downloads/ic15_rec/ic15
+    label_file_list:
+      - E:/codeding/PaddleOcr/output/debug_ic15/gt_train_128.txt
+    transforms:
+      - DecodeImage:
+          img_mode: BGR
+          channel_first: false
+      - CTCLabelEncode:
+      - RecResizeImg:
+          image_shape: [3, 48, 320]
+      - KeepKeys:
+          keep_keys:
+            - image
+            - label
+            - length
+            - valid_ratio
+  loader:
+    batch_size_per_card: 32
+    shuffle: true
+    drop_last: false
+    num_workers: 2
+
+Eval:
+  dataset:
+    name: SimpleDataSet
+    data_dir: C:/Users/li/Downloads/ic15_rec/ic15
+    label_file_list:
+      - E:/codeding/PaddleOcr/output/debug_ic15/gt_train_128.txt
+    transforms:
+      - DecodeImage:
+          img_mode: BGR
+          channel_first: false
+      - CTCLabelEncode:
+      - RecResizeImg:
+          image_shape: [3, 48, 320]
+      - KeepKeys:
+          keep_keys:
+            - image
+            - label
+            - length
+            - valid_ratio
+  loader:
+    batch_size_per_card: 32
+    shuffle: false
+    drop_last: false
+    num_workers: 1

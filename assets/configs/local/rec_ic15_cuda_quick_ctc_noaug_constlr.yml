@@ -1,0 +1,97 @@
+Global:
+  device: cuda
+  use_amp: true
+  epoch_num: 5
+  save_model_dir: ./output/rec_ic15_cuda_quick_ctc_noaug_constlr
+  save_epoch_step: 1
+  print_batch_step: 20
+  eval_batch_step: [0, 100]
+  cal_metric_during_train: true
+  calc_epoch_interval: 1
+  log_smooth_window: 20
+  save_batch_model: false
+  min_improve_delta: 0.0001
+  character_dict_path: assets/dicts/ic15_full_auto_dict.txt
+  max_text_length: 32
+  use_space_char: true
+  seed: 1024
+  deterministic: true
+
+Optimizer:
+  name: Adam
+  beta1: 0.9
+  beta2: 0.999
+  lr:
+    name: Exponential
+    learning_rate: 0.001
+    gamma: 1.0
+  regularizer:
+    name: L2
+    factor: 0.00003
+
+Architecture:
+  model_type: rec
+  algorithm: CRNN
+  Backbone:
+    name: MobileNetV3
+    model_name: small
+  Neck:
+    name: SequenceEncoder
+    encoder_type: rnn
+    hidden_size: 96
+  Head:
+    name: CTCHead
+    hidden_size: 96
+
+Loss:
+  name: CTCLoss
+
+Train:
+  dataset:
+    name: SimpleDataSet
+    data_dir: C:/Users/li/Downloads/ic15_rec/ic15
+    label_file_list:
+      - C:/Users/li/Downloads/ic15_rec/ic15/gt_train.txt
+    transforms:
+      - DecodeImage:
+          img_mode: BGR
+          channel_first: false
+      - CTCLabelEncode:
+      - RecResizeImg:
+          image_shape: [3, 48, 320]
+      - KeepKeys:
+          keep_keys:
+            - image
+            - label
+            - length
+            - valid_ratio
+  loader:
+    batch_size_per_card: 50
+    shuffle: true
+    drop_last: true
+    num_workers: 4
+
+Eval:
+  dataset:
+    name: SimpleDataSet
+    data_dir: C:/Users/li/Downloads/ic15_rec/ic15
+    label_file_list:
+      - C:/Users/li/Downloads/ic15_rec/ic15/gt_test.txt
+    transforms:
+      - DecodeImage:
+          img_mode: BGR
+          channel_first: false
+      - CTCLabelEncode:
+      - RecResizeImg:
+          image_shape: [3, 48, 320]
+      - KeepKeys:
+          keep_keys:
+            - image
+            - label
+            - length
+            - valid_ratio
+  loader:
+    batch_size_per_card: 50
+    shuffle: false
+    drop_last: false
+    num_workers: 2

@@ -35,7 +35,7 @@ internal sealed class SimpleDetDataset
     public int Count => _samples.Count;
     public DetDataAudit Audit { get; }
 
-    public IEnumerable<(float[] Images, float[] ShrinkMaps, float[] ThresholdMaps, int Batch)> GetBatches(int batchSize, bool shuffle, Random rng)
+    public IEnumerable<(float[] Images, float[] ShrinkMaps, float[] ShrinkMasks, float[] ThresholdMaps, float[] ThresholdMasks, int Batch)> GetBatches(int batchSize, bool shuffle, Random rng)
     {
         var indices = Enumerable.Range(0, _samples.Count).ToList();
         if (shuffle)
@@ -52,21 +52,25 @@ internal sealed class SimpleDetDataset
             var take = Math.Min(batchSize, indices.Count - offset);
             var images = new float[take * 3 * _size * _size];
             var shrinkMaps = new float[take * _size * _size];
+            var shrinkMasks = new float[take * _size * _size];
             var thresholdMaps = new float[take * _size * _size];
+            var thresholdMasks = new float[take * _size * _size];
             for (var bi = 0; bi < take; bi++)
             {
                 var sample = _samples[indices[offset + bi]];
-                var (img, shrinkMap, thresholdMap) = LoadItem(sample);
+                var (img, shrinkMap, shrinkMask, thresholdMap, thresholdMask) = LoadItem(sample);
                 Array.Copy(img, 0, images, bi * img.Length, img.Length);
                 Array.Copy(shrinkMap, 0, shrinkMaps, bi * shrinkMap.Length, shrinkMap.Length);
+                Array.Copy(shrinkMask, 0, shrinkMasks, bi * shrinkMask.Length, shrinkMask.Length);
                 Array.Copy(thresholdMap, 0, thresholdMaps, bi * thresholdMap.Length, thresholdMap.Length);
+                Array.Copy(thresholdMask, 0, thresholdMasks, bi * thresholdMask.Length, thresholdMask.Length);
             }
 
-            yield return (images, shrinkMaps, thresholdMaps, take);
+            yield return (images, shrinkMaps, shrinkMasks, thresholdMaps, thresholdMasks, take);
         }
     }
 
-    private (float[] Image, float[] ShrinkMap, float[] ThresholdMap) LoadItem(DetSample sample)
+    private (float[] Image, float[] ShrinkMap, float[] ShrinkMask, float[] ThresholdMap, float[] ThresholdMask) LoadItem(DetSample sample)
     {
         using var img = Image.Load<Rgb24>(sample.ImagePath);
         var srcW = img.Width;
@@ -88,7 +92,7 @@ internal sealed class SimpleDetDataset
         }
 
         var fullMask = new float[_size * _size];
-        var shrinkMask = new float[_size * _size];
+        var shrinkMap = new float[_size * _size];
         foreach (var poly in sample.Polygons)
         {
             var scaled = poly
@@ -100,14 +104,14 @@ internal sealed class SimpleDetDataset
                 .ToArray();
             RasterizePolygon(fullMask, _size, scaled, 1f);
             var shrunk = ShrinkPolygon(scaled, _shrinkRatio, _size - 1, _size - 1);
-            RasterizePolygon(shrinkMask, _size, shrunk, 1f);
+            RasterizePolygon(shrinkMap, _size, shrunk, 1f);
         }
 
         var thresholdMap = new float[_size * _size];
         var mid = (_threshMin + _threshMax) * 0.5f;
         for (var i = 0; i < thresholdMap.Length; i++)
         {
-            if (shrinkMask[i] > 0.5f)
+            if (shrinkMap[i] > 0.5f)
             {
                 thresholdMap[i] = _threshMax;
             }
@@ -121,7 +125,14 @@ internal sealed class SimpleDetDataset
             }
         }
 
-        return (imageData, shrinkMask, thresholdMap);
+        // Use fullMask as both shrink_mask and threshold_mask
+        // This marks all text regions as valid for loss computation
+        var shrinkMask = new float[_size * _size];
+        var thresholdMask = new float[_size * _size];
+        Array.Copy(fullMask, shrinkMask, fullMask.Length);
+        Array.Copy(fullMask, thresholdMask, fullMask.Length);
+
+        return (imageData, shrinkMap, shrinkMask, thresholdMap, thresholdMask);
     }
 
     private static void RasterizePolygon(float[] target, int size, int[][] poly, float value)
