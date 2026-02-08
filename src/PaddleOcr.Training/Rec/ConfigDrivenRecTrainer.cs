@@ -1409,14 +1409,25 @@ internal sealed class ConfigDrivenRecTrainer
                                 var dims = neckCfg.TryGetValue("dims", out var dimsObj) ? ToInt(dimsObj) : 0;
                                 var depth = neckCfg.TryGetValue("depth", out var depthObj) ? ToInt(depthObj) : 1;
                                 var hiddenDims = neckCfg.TryGetValue("hidden_dims", out var hiddenObj) ? ToInt(hiddenObj) : 0;
+                                var useGuide = neckCfg.TryGetValue("use_guide", out var guideObj) && ToBool(guideObj);
+                                var numHeads = neckCfg.TryGetValue("num_heads", out var headsObj) ? ToInt(headsObj) : 8;
+                                var qkvBias = !neckCfg.TryGetValue("qkv_bias", out var biasObj) || ToBool(biasObj);
+                                var mlpRatio = neckCfg.TryGetValue("mlp_ratio", out var ratioObj) ? ToFloat(ratioObj) : 2.0f;
+                                var dropRate = neckCfg.TryGetValue("drop_rate", out var dropObj) ? ToFloat(dropObj) : 0.1f;
+                                var attnDropRate = neckCfg.TryGetValue("attn_drop_rate", out var attnDropObj) ? ToFloat(attnDropObj) : 0.1f;
+                                var dropPath = neckCfg.TryGetValue("drop_path", out var pathObj) ? ToFloat(pathObj) : 0.0f;
+                                var kernelSize = ExtractKernelSize(neckCfg);
 
-                                _logger.LogDebug("CTC Neck: encoderType={Type}, dims={Dims}, depth={Depth}, hiddenDims={Hidden}",
-                                    encoderType, dims, depth, hiddenDims);
+                                _logger.LogDebug("CTC Neck: encoderType={Type}, dims={Dims}, depth={Depth}, hiddenDims={Hidden}, useGuide={Guide}, numHeads={Heads}",
+                                    encoderType, dims, depth, hiddenDims, useGuide, numHeads);
 
                                 if (dims > 0 && !string.Equals(encoderType, "reshape", StringComparison.OrdinalIgnoreCase))
                                 {
-                                    ctcNeckConfig = new MultiHeadCtcNeckConfig(encoderType, dims, depth, hiddenDims);
-                                    _logger.LogInformation("✓ CTC Neck config created");
+                                    ctcNeckConfig = new MultiHeadCtcNeckConfig(
+                                        encoderType, dims, depth, hiddenDims,
+                                        useGuide, numHeads, qkvBias, mlpRatio,
+                                        dropRate, attnDropRate, dropPath, kernelSize);
+                                    _logger.LogInformation("✓ CTC Neck config created with SVTR params");
                                 }
                                 else
                                 {
@@ -1465,6 +1476,49 @@ internal sealed class ConfigDrivenRecTrainer
             decimal m => (int)m,
             _ => int.TryParse(obj.ToString(), out var parsed) ? parsed : 0
         };
+    }
+
+    private static float ToFloat(object? obj)
+    {
+        if (obj is null) return 0f;
+        return obj switch
+        {
+            float f => f,
+            double d => (float)d,
+            decimal m => (float)m,
+            int i => i,
+            long l => l,
+            _ => float.TryParse(obj.ToString(), out var parsed) ? parsed : 0f
+        };
+    }
+
+    private static bool ToBool(object? obj)
+    {
+        if (obj is null) return false;
+        return obj switch
+        {
+            bool b => b,
+            int i => i != 0,
+            long l => l != 0,
+            string s => s.Equals("true", StringComparison.OrdinalIgnoreCase) || s.Equals("1"),
+            _ => false
+        };
+    }
+
+    private static int[]? ExtractKernelSize(Dictionary<string, object?> neckCfg)
+    {
+        if (!neckCfg.TryGetValue("kernel_size", out var ksObj)) return null;
+
+        if (ksObj is IList<object?> list)
+        {
+            if (list.Count >= 2)
+            {
+                var k0 = ToInt(list[0]);
+                var k1 = ToInt(list[1]);
+                return k0 > 0 && k1 > 0 ? new[] { k0, k1 } : null;
+            }
+        }
+        return null;
     }
 
     private static string InferBackboneName(string algorithm)

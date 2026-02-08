@@ -7,12 +7,21 @@ namespace PaddleOcr.Training.Rec.Heads;
 
 /// <summary>
 /// Config for CTC branch internal neck encoder (SVTR or other).
+/// Includes all SVTR-specific parameters.
 /// </summary>
 public record MultiHeadCtcNeckConfig(
     string EncoderType,
     int Dims,
     int Depth,
-    int HiddenDims);
+    int HiddenDims,
+    bool UseGuide = false,
+    int NumHeads = 8,
+    bool QkvBias = true,
+    float MlpRatio = 2.0f,
+    float DropRate = 0.1f,
+    float AttnDropRate = 0.1f,
+    float DropPath = 0.0f,
+    int[]? KernelSize = null);
 
 /// <summary>
 /// Multi-head rec head: CTC + optional GTC branch (NRTR/SAR/Attention).
@@ -65,8 +74,20 @@ public sealed class MultiHead : Module<Tensor, Tensor>, IRecHead
         // CTC branch: optionally with internal encoder
         if (ctcNeckConfig is not null)
         {
-            _ctcEncoder = new SequenceEncoder(inChannels, ctcNeckConfig.EncoderType,
-                ctcNeckConfig.Dims, ctcNeckConfig.Depth, ctcNeckConfig.HiddenDims);
+            _ctcEncoder = new SequenceEncoder(
+                inChannels,
+                ctcNeckConfig.EncoderType,
+                ctcNeckConfig.Dims,
+                ctcNeckConfig.Depth,
+                ctcNeckConfig.HiddenDims,
+                ctcNeckConfig.UseGuide,
+                ctcNeckConfig.NumHeads,
+                ctcNeckConfig.QkvBias,
+                ctcNeckConfig.MlpRatio,
+                ctcNeckConfig.DropRate,
+                ctcNeckConfig.AttnDropRate,
+                ctcNeckConfig.DropPath,
+                ctcNeckConfig.KernelSize);
             _ctcHead = new CTCHead(_ctcEncoder.OutChannels, outChannelsCtc);
         }
         else

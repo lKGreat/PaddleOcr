@@ -29,9 +29,23 @@ public sealed class SequenceEncoder : Module<Tensor, Tensor>, IRecNeck
     }
 
     /// <summary>
-    /// Enhanced constructor supporting SVTR with dims/depth/hidden_dims.
+    /// Enhanced constructor supporting SVTR with all parameters.
     /// </summary>
-    public SequenceEncoder(int inChannels, string encoderType = "rnn", int dims = 0, int depth = 1, int hiddenDims = 0, int hiddenSize = 48)
+    public SequenceEncoder(
+        int inChannels,
+        string encoderType = "rnn",
+        int dims = 0,
+        int depth = 1,
+        int hiddenDims = 0,
+        bool useGuide = false,
+        int numHeads = 8,
+        bool qkvBias = true,
+        float mlpRatio = 2.0f,
+        float dropRate = 0.1f,
+        float attnDropRate = 0.1f,
+        float dropPath = 0.0f,
+        int[]? kernelSize = null,
+        int hiddenSize = 48)
         : base(nameof(SequenceEncoder))
     {
         _encoderType = encoderType.ToLowerInvariant();
@@ -51,10 +65,20 @@ public sealed class SequenceEncoder : Module<Tensor, Tensor>, IRecNeck
                 _onlyReshape = false;
                 break;
             case "svtr":
-                // Enhanced SVTR with dims/depth support
-                _encoder = dims > 0
-                    ? new EncoderWithSVTR(inChannels, dims, depth, hiddenDims)
-                    : new EncoderWithSVTR(inChannels);
+                // Full SVTR with all parameters
+                _encoder = new EncoderWithSVTR(
+                    inChannels,
+                    dims: dims > 0 ? dims : 64,
+                    depth: depth > 0 ? depth : 2,
+                    hiddenDims: hiddenDims > 0 ? hiddenDims : 120,
+                    useGuide: useGuide,
+                    numHeads: numHeads,
+                    qkvBias: qkvBias,
+                    mlpRatio: mlpRatio,
+                    dropRate: dropRate,
+                    attnDropRate: attnDropRate,
+                    dropPath: dropPath,
+                    kernelSize: kernelSize);
                 OutChannels = ((EncoderWithSVTR)_encoder).OutChannels;
                 _onlyReshape = false;
                 break;
@@ -178,7 +202,7 @@ internal sealed class EncoderWithSVTR : Module<Tensor, Tensor>
     private readonly ConvBNLayer _conv1;
     private readonly ConvBNLayer _conv2;
     private readonly TorchSharp.Modules.ModuleList<SVTRBlock> _svtrBlocks;
-    private readonly LayerNorm _norm;
+    private readonly TorchSharp.Modules.LayerNorm _norm;
     private readonly ConvBNLayer _conv3;
     private readonly ConvBNLayer _conv4;
     private readonly ConvBNLayer _conv1x1;
@@ -222,7 +246,7 @@ internal sealed class EncoderWithSVTR : Module<Tensor, Tensor>
         }
 
         // Output normalization
-        _norm = LayerNorm(hiddenDims);
+        _norm = nn.LayerNorm(hiddenDims);
 
         // hidden_dims → inChannels
         _conv3 = new ConvBNLayer(hiddenDims, inChannels, new[] { 1, 1 });
@@ -284,7 +308,7 @@ internal sealed class EncoderWithSVTR : Module<Tensor, Tensor>
 internal sealed class ConvBNLayer : Module<Tensor, Tensor>
 {
     private readonly TorchSharp.Modules.Conv2d _conv;
-    private readonly BatchNorm2d _norm;
+    private readonly TorchSharp.Modules.BatchNorm2d _norm;
     private readonly Module<Tensor, Tensor> _act;
 
     public ConvBNLayer(
@@ -298,10 +322,20 @@ internal sealed class ConvBNLayer : Module<Tensor, Tensor>
     {
         padding ??= new[] { kernelSize[0] / 2, kernelSize[1] / 2 };
 
-        _conv = Conv2d(inChannels, outChannels, kernel_size: kernelSize,
-            stride: stride, padding: padding, bias: false);
-        _norm = BatchNorm2d(outChannels);
-        _act = useActivation ? SiLU() : Identity();
+        var kernelH = kernelSize[0];
+        var kernelW = kernelSize.Length > 1 ? kernelSize[1] : kernelSize[0];
+        var padH = padding[0];
+        var padW = padding.Length > 1 ? padding[1] : padding[0];
+
+        _conv = nn.Conv2d(
+            inChannels,
+            outChannels,
+            (kernelH, kernelW),
+            stride: (stride, stride),
+            padding: (padH, padW),
+            bias: false);
+        _norm = nn.BatchNorm2d(outChannels);
+        _act = useActivation ? nn.SiLU() : new Identity();
 
         RegisterComponents();
     }
@@ -320,9 +354,9 @@ internal sealed class ConvBNLayer : Module<Tensor, Tensor>
 /// </summary>
 internal sealed class SVTRBlock : Module<Tensor, Tensor>
 {
-    private readonly LayerNorm _norm1;
+    private readonly TorchSharp.Modules.LayerNorm _norm1;
     private readonly MultiHeadAttention _attention;
-    private readonly LayerNorm _norm2;
+    private readonly TorchSharp.Modules.LayerNorm _norm2;
     private readonly Module<Tensor, Tensor> _mlp;
 
     public SVTRBlock(
@@ -335,17 +369,17 @@ internal sealed class SVTRBlock : Module<Tensor, Tensor>
         float dropRate = 0.1f)
         : base(nameof(SVTRBlock))
     {
-        _norm1 = LayerNorm(dim);
+        _norm1 = nn.LayerNorm(dim);
         _attention = new MultiHeadAttention(dim, numHeads, qkvBias, attnDropRate);
-        _norm2 = LayerNorm(dim);
+        _norm2 = nn.LayerNorm(dim);
 
         var hiddenDim = (int)(dim * mlpRatio);
-        _mlp = Sequential(
-            Linear(dim, hiddenDim),
-            SiLU(),
-            Dropout(dropRate),
-            Linear(hiddenDim, dim),
-            Dropout(dropRate));
+        _mlp = nn.Sequential(
+            nn.Linear(dim, hiddenDim),
+            nn.SiLU(),
+            nn.Dropout(dropRate),
+            nn.Linear(hiddenDim, dim),
+            nn.Dropout(dropRate));
 
         RegisterComponents();
     }
@@ -374,10 +408,10 @@ internal sealed class MultiHeadAttention : Module<Tensor, Tensor>
     private readonly int _numHeads;
     private readonly int _headDim;
     private readonly float _scale;
-    private readonly Linear _qkvProj;
-    private readonly Linear _outProj;
-    private readonly Dropout _attnDropout;
-    private readonly Dropout _projDropout;
+    private readonly TorchSharp.Modules.Linear _qkvProj;
+    private readonly TorchSharp.Modules.Linear _outProj;
+    private readonly TorchSharp.Modules.Dropout _attnDropout;
+    private readonly TorchSharp.Modules.Dropout _projDropout;
 
     public MultiHeadAttention(
         int dim,
@@ -391,10 +425,10 @@ internal sealed class MultiHeadAttention : Module<Tensor, Tensor>
         _headDim = dim / numHeads;
         _scale = 1.0f / (float)Math.Sqrt(_headDim);
 
-        _qkvProj = Linear(dim, dim * 3, bias: qkvBias);
-        _outProj = Linear(dim, dim);
-        _attnDropout = Dropout(attnDropRate);
-        _projDropout = Dropout(projDropRate);
+        _qkvProj = nn.Linear(dim, dim * 3, qkvBias);
+        _outProj = nn.Linear(dim, dim);
+        _attnDropout = nn.Dropout(attnDropRate);
+        _projDropout = nn.Dropout(projDropRate);
 
         RegisterComponents();
     }
