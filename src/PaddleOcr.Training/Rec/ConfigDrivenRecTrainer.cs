@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text;
+using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using PaddleOcr.Data;
 using PaddleOcr.Data.LabelEncoders;
@@ -26,7 +27,7 @@ internal sealed class ConfigDrivenRecTrainer
     public TrainingSummary Train(TrainingConfigView cfg)
     {
         var shape = cfg.RecImageShape;
-        var (charToId, vocab) = SimpleRecDataset.LoadDictionary(cfg.RecCharDictPath, cfg.UseSpaceChar);
+        var (charToId, _) = SimpleRecDataset.LoadDictionary(cfg.RecCharDictPath, cfg.UseSpaceChar);
         var trainLabelFiles = GetLabelFilesOrFallback(cfg.TrainLabelFiles, cfg.TrainLabelFile);
         var evalLabelFiles = GetLabelFilesOrFallback(cfg.EvalLabelFiles, cfg.EvalLabelFile);
         EnsureCharsetCoverage(trainLabelFiles, evalLabelFiles, charToId, _logger);
@@ -63,9 +64,9 @@ internal sealed class ConfigDrivenRecTrainer
 
         var dev = ResolveDevice(cfg);
         _logger.LogInformation("Training(rec) device: {Device}", dev.type);
-        _logger.LogInformation("Train samples: {TrainCount}, Eval samples: {EvalCount}, Vocab: {Vocab}", trainSet.Count, evalSet.Count, vocab.Count);
+        _logger.LogInformation("Train samples: {TrainCount}, Eval samples: {EvalCount}, Vocab: {Vocab}", trainSet.Count, evalSet.Count, ctcEncoder.NumClasses);
 
-        var model = BuildModel(cfg, vocab.Count + 1, gtcEncodeType);
+        var model = BuildModel(cfg, ctcEncoder.NumClasses, gtcEncodeType);
         model.to(dev);
 
         var optimizer = BuildOptimizer(cfg, model);
@@ -84,6 +85,12 @@ internal sealed class ConfigDrivenRecTrainer
         var earlyStopped = false;
         var globalStep = 0;
         var startEpoch = 1;
+        var optimizerStepCount = 0;
+        var nonZeroGradSteps = 0;
+        var tracePath = Path.Combine(cfg.SaveModelDir, "train_trace.jsonl");
+        var epochTracePath = Path.Combine(cfg.SaveModelDir, "train_epoch_summary.jsonl");
+        var recentLoss = new Queue<float>(cfg.LogSmoothWindow);
+        var stepWatch = Stopwatch.StartNew();
 
         if (cfg.ResumeTraining)
         {
@@ -179,7 +186,13 @@ internal sealed class ConfigDrivenRecTrainer
                 var shouldUpdate = gradAccumulator.ShouldUpdate();
                 if (gradsOk && shouldUpdate)
                 {
+                    var gradNorm = EstimateGradNorm(model);
+                    if (gradNorm > 0f)
+                    {
+                        nonZeroGradSteps++;
+                    }
                     optimizer.step();
+                    optimizerStepCount++;
                     optimizer.zero_grad();
                 }
 
@@ -189,10 +202,81 @@ internal sealed class ConfigDrivenRecTrainer
                 sampleCount += batchData.Batch;
                 globalStep++;
 
+                if (cfg.SaveBatchModel)
+                {
+                    ckptManager.SaveModel(cfg.SaveModelDir, model, $"iter_step_{globalStep}.pt");
+                }
+
+                recentLoss.Enqueue(lossVal);
+                while (recentLoss.Count > cfg.LogSmoothWindow)
+                {
+                    _ = recentLoss.Dequeue();
+                }
+
+                if (globalStep % cfg.PrintBatchStep == 0)
+                {
+                    var smoothedLoss = recentLoss.Count == 0 ? lossVal : recentLoss.Average();
+                    var stepMs = stepWatch.Elapsed.TotalMilliseconds;
+                    stepWatch.Restart();
+                    AppendJsonLine(
+                        tracePath,
+                        new
+                        {
+                            epoch,
+                            global_step = globalStep,
+                            loss = lossVal,
+                            smooth_loss = smoothedLoss,
+                            lr = lrScheduler.CurrentLR,
+                            batch = batchData.Batch,
+                            width = batchData.Width,
+                            step_ms = stepMs,
+                            optimizer_step_count = optimizerStepCount,
+                            non_zero_grad_steps = nonZeroGradSteps
+                        });
+                    _logger.LogInformation(
+                        "train step epoch={Epoch} step={Step} loss={Loss:F4} smooth_loss={Smooth:F4} lr={Lr:F6} step_ms={StepMs:F1}",
+                        epoch,
+                        globalStep,
+                        lossVal,
+                        smoothedLoss,
+                        lrScheduler.CurrentLR,
+                        stepMs);
+                }
+
                 if (shouldUpdate || globalStep == 1)
                 {
                     lrScheduler.Step(globalStep, epoch);
                     ApplyLearningRate(optimizer, lrScheduler.CurrentLR);
+                }
+
+                if (cfg.CalMetricDuringTrain && ShouldEvalByStep(cfg, globalStep))
+                {
+                    var stepEval = Evaluate(model, evalSet, cfg.EvalBatchSize, shape.H, cfg.MaxTextLength, dev, ctcEncoder.Characters);
+                    if (stepEval.Accuracy > bestAcc + cfg.MinImproveDelta)
+                    {
+                        bestAcc = stepEval.Accuracy;
+                        ckptManager.SaveFull(cfg.SaveModelDir, "best", model, optimizer, lrScheduler, epoch, globalStep, bestAcc);
+                    }
+
+                    AppendJsonLine(
+                        epochTracePath,
+                        new
+                        {
+                            event_type = "step_eval",
+                            epoch,
+                            global_step = globalStep,
+                            eval_acc = stepEval.Accuracy,
+                            eval_char_acc = stepEval.CharacterAccuracy,
+                            eval_edit = stepEval.AvgEditDistance,
+                            best_acc = bestAcc
+                        });
+                    _logger.LogInformation(
+                        "step eval epoch={Epoch} step={Step} eval_acc={EvalAcc:F4} best_acc={BestAcc:F4}",
+                        epoch,
+                        globalStep,
+                        stepEval.Accuracy,
+                        bestAcc);
+                    model.train();
                 }
 
                 DisposeTensorDictionary(predictions);
@@ -205,7 +289,7 @@ internal sealed class ConfigDrivenRecTrainer
             }
 
             var trainLoss = sampleCount == 0 ? 0f : lossSum / sampleCount;
-            var evalMetrics = Evaluate(model, evalSet, cfg.EvalBatchSize, shape.H, cfg.MaxTextLength, dev, vocab);
+            var evalMetrics = Evaluate(model, evalSet, cfg.EvalBatchSize, shape.H, cfg.MaxTextLength, dev, ctcEncoder.Characters);
 
             if (evalMetrics.Accuracy > bestAcc + cfg.MinImproveDelta)
             {
@@ -219,6 +303,10 @@ internal sealed class ConfigDrivenRecTrainer
             }
 
             ckptManager.SaveFull(cfg.SaveModelDir, "latest", model, optimizer, lrScheduler, epoch, globalStep, bestAcc);
+            if (epoch % cfg.SaveEpochStep == 0)
+            {
+                ckptManager.SaveFull(cfg.SaveModelDir, $"epoch_{epoch}", model, optimizer, lrScheduler, epoch, globalStep, bestAcc);
+            }
             _logger.LogInformation(
                 "epoch={Epoch}/{Total} train_loss={Loss:F4} eval_acc={EvalAcc:F4} eval_char_acc={CharAcc:F4} eval_edit={Edit:F4} lr={Lr:F6}",
                 epoch,
@@ -228,6 +316,20 @@ internal sealed class ConfigDrivenRecTrainer
                 evalMetrics.CharacterAccuracy,
                 evalMetrics.AvgEditDistance,
                 lrScheduler.CurrentLR);
+            AppendJsonLine(
+                epochTracePath,
+                new
+                {
+                    epoch,
+                    total_epoch = cfg.EpochNum,
+                    train_loss = trainLoss,
+                    eval_acc = evalMetrics.Accuracy,
+                    eval_char_acc = evalMetrics.CharacterAccuracy,
+                    eval_edit = evalMetrics.AvgEditDistance,
+                    lr = lrScheduler.CurrentLR,
+                    optimizer_step_count = optimizerStepCount,
+                    non_zero_grad_steps = nonZeroGradSteps
+                });
 
             epochsCompleted = epoch;
 
@@ -250,14 +352,14 @@ internal sealed class ConfigDrivenRecTrainer
         model.Dispose();
 
         var summary = new TrainingSummary(epochsCompleted, bestAcc, cfg.SaveModelDir);
-        SaveSummary(cfg, summary, earlyStopped, cfg.ResumeTraining ? cfg.SaveModelDir : null);
+        SaveSummary(cfg, summary, earlyStopped, cfg.ResumeTraining ? cfg.SaveModelDir : null, optimizerStepCount, nonZeroGradSteps);
         return summary;
     }
 
     public EvaluationSummary Eval(TrainingConfigView cfg)
     {
         var shape = cfg.RecImageShape;
-        var (_, vocab) = SimpleRecDataset.LoadDictionary(cfg.RecCharDictPath, cfg.UseSpaceChar);
+        _ = SimpleRecDataset.LoadDictionary(cfg.RecCharDictPath, cfg.UseSpaceChar);
         var gtcEncodeType = ResolveGtcEncodeType(cfg);
         var ctcEncoder = new CTCLabelEncode(cfg.MaxTextLength, cfg.RecCharDictPath, cfg.UseSpaceChar);
         var gtcEncoder = CreateGtcEncoder(gtcEncodeType, cfg);
@@ -275,7 +377,7 @@ internal sealed class ConfigDrivenRecTrainer
             enableAugmentation: false);
 
         var dev = ResolveDevice(cfg);
-        var model = BuildModel(cfg, vocab.Count + 1, gtcEncodeType);
+        var model = BuildModel(cfg, ctcEncoder.NumClasses, gtcEncodeType);
         model.to(dev);
 
         var ckpt = ResolveEvalCheckpoint(cfg);
@@ -284,7 +386,7 @@ internal sealed class ConfigDrivenRecTrainer
             TryLoadCheckpoint(model, ckpt);
         }
 
-        var metrics = Evaluate(model, evalSet, cfg.EvalBatchSize, shape.H, cfg.MaxTextLength, dev, vocab);
+        var metrics = Evaluate(model, evalSet, cfg.EvalBatchSize, shape.H, cfg.MaxTextLength, dev, ctcEncoder.Characters);
         model.Dispose();
 
         var summary = new EvaluationSummary(metrics.Accuracy, evalSet.Count);
@@ -406,7 +508,7 @@ internal sealed class ConfigDrivenRecTrainer
         int h,
         int maxTextLength,
         Device dev,
-        IReadOnlyList<char> vocab)
+        IReadOnlyList<string> vocab)
     {
         model.eval();
         long correct = 0;
@@ -434,7 +536,7 @@ internal sealed class ConfigDrivenRecTrainer
                 var predSeq = predFlat.Skip(i * maxTextLength).Take(maxTextLength).ToArray();
                 var gtSeq = gtFlat.Skip(i * maxTextLength).Take(maxTextLength).ToArray();
                 var predText = DecodeCtcPrediction(predSeq, vocab);
-                var gtText = SimpleRecDataset.Decode(gtSeq, vocab);
+                var gtText = DecodeLabel(gtSeq, vocab);
                 if (string.Equals(predText, gtText, StringComparison.Ordinal))
                 {
                     correct++;
@@ -492,7 +594,7 @@ internal sealed class ConfigDrivenRecTrainer
         return prev[right.Length];
     }
 
-    private static string DecodeCtcPrediction(long[] ids, IReadOnlyList<char> vocab)
+    private static string DecodeCtcPrediction(long[] ids, IReadOnlyList<string> vocab)
     {
         if (ids.Length == 0)
         {
@@ -514,12 +616,33 @@ internal sealed class ConfigDrivenRecTrainer
                 continue;
             }
 
-            if (id <= vocab.Count)
+            if (id < vocab.Count)
             {
-                sb.Append(vocab[(int)id - 1]);
+                sb.Append(vocab[(int)id]);
             }
 
             prev = id;
+        }
+
+        return sb.ToString();
+    }
+
+    private static string DecodeLabel(long[] ids, IReadOnlyList<string> vocab)
+    {
+        if (ids.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        var sb = new StringBuilder(ids.Length);
+        foreach (var id in ids)
+        {
+            if (id <= 0 || id >= vocab.Count)
+            {
+                continue;
+            }
+
+            sb.Append(vocab[(int)id]);
         }
 
         return sb.ToString();
@@ -566,7 +689,13 @@ internal sealed class ConfigDrivenRecTrainer
         return null;
     }
 
-    private static void SaveSummary(TrainingConfigView cfg, TrainingSummary summary, bool earlyStopped, string? resumeCheckpoint)
+    private static void SaveSummary(
+        TrainingConfigView cfg,
+        TrainingSummary summary,
+        bool earlyStopped,
+        string? resumeCheckpoint,
+        int optimizerStepCount,
+        int nonZeroGradSteps)
     {
         Directory.CreateDirectory(cfg.SaveModelDir);
         var json = JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true });
@@ -584,6 +713,45 @@ internal sealed class ConfigDrivenRecTrainer
         File.WriteAllText(
             Path.Combine(cfg.SaveModelDir, "train_run_summary.json"),
             JsonSerializer.Serialize(run, new JsonSerializerOptions { WriteIndented = true }));
+        AppendJsonLine(
+            Path.Combine(cfg.SaveModelDir, "train_trace.jsonl"),
+            new
+            {
+                event_type = "train_completed",
+                optimizer_step_count = optimizerStepCount,
+                non_zero_grad_steps = nonZeroGradSteps,
+                generated_at_utc = DateTime.UtcNow
+            });
+    }
+
+    private static void AppendJsonLine(string path, object payload)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path) ?? ".");
+        var line = JsonSerializer.Serialize(payload);
+        File.AppendAllText(path, line + Environment.NewLine);
+    }
+
+    private static float EstimateGradNorm(RecModel model)
+    {
+        double sum = 0d;
+        foreach (var parameter in model.parameters())
+        {
+            var grad = parameter.grad;
+            if (grad is null)
+            {
+                continue;
+            }
+
+            using var gradCpu = grad.cpu().to_type(ScalarType.Float32);
+            var values = gradCpu.data<float>().ToArray();
+            for (var i = 0; i < values.Length; i++)
+            {
+                var v = values[i];
+                sum += v * v;
+            }
+        }
+
+        return (float)Math.Sqrt(sum);
     }
 
     private static void EnsureCharsetCoverage(IReadOnlyList<string> trainLabelFiles, IReadOnlyList<string> evalLabelFiles, IReadOnlyDictionary<char, int> charToId, ILogger logger)
@@ -652,6 +820,17 @@ internal sealed class ConfigDrivenRecTrainer
     private static bool ShouldUseModelAveraging(TrainingConfigView cfg)
     {
         return cfg.GetConfigBool("Global.use_model_averaging", false);
+    }
+
+    private static bool ShouldEvalByStep(TrainingConfigView cfg, int globalStep)
+    {
+        var (start, interval) = cfg.EvalBatchStep;
+        if (globalStep < start)
+        {
+            return false;
+        }
+
+        return (globalStep - start) % interval == 0;
     }
 
     private static IReadOnlyList<string> GetLabelFilesOrFallback(IReadOnlyList<string> labelFiles, string fallback)

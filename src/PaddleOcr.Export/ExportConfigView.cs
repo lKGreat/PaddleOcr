@@ -16,6 +16,8 @@ public sealed class ExportConfigView
     public string SaveInferenceDir => ResolvePath(GetString("Global.save_inference_dir", "./inference"));
     public string? Checkpoints => ResolvePathOrNull(GetStringOrNull("Global.checkpoints"));
     public string? PretrainedModel => ResolvePathOrNull(GetStringOrNull("Global.pretrained_model"));
+    public string StaticEquivalence => GetString("Global.static_equivalence", "strict").Trim().ToLowerInvariant();
+    public string PaddleExportSource => GetString("Global.paddle_export_source", "paddle").Trim().ToLowerInvariant();
     public IReadOnlyList<string> LabelList => GetStringList("Global.label_list");
     public string? RecCharDictPath => ResolvePathOrNull(
         GetStringOrNull("Global.rec_char_dict_path") ??

@@ -339,6 +339,7 @@ public sealed class InferenceExecutor : ICommandExecutor
         var maxTextLength = ParseInt(ResolveString(context, "--max_text_length", "Global.max_text_length") ?? "25", 25, 1);
         var recImageInverse = ParseBool(ResolveString(context, "--rec_image_inverse", "Global.rec_image_inverse") ?? "false");
         var returnWordBox = ParseBool(ResolveString(context, "--return_word_box", "Global.return_word_box") ?? "false");
+        var recLogDetail = ParseBool(ResolveString(context, "--rec_log_detail", "Global.rec_log_detail") ?? "false");
 
         var output = ResolveOutputDir(context, "rec");
         var options = new RecOnnxOptions(
@@ -353,7 +354,8 @@ public sealed class InferenceExecutor : ICommandExecutor
             recBatchNum,
             maxTextLength,
             recImageInverse,
-            returnWordBox);
+            returnWordBox,
+            recLogDetail);
         new RecOnnxRunner().Run(options);
         return CommandResult.Ok($"infer rec completed. algorithm={recAlgorithm}, output={output}");
     }

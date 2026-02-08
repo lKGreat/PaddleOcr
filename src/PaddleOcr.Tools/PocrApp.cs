@@ -50,6 +50,7 @@ public sealed class PocrApp
             "train" => await _training.ExecuteAsync("train", context, cancellationToken),
             "eval" => await _training.ExecuteAsync("eval", context, cancellationToken),
             "export" => await _export.ExecuteAsync("export", context, cancellationToken),
+            "export-pdmodel" => await _export.ExecuteAsync("export-pdmodel", context, cancellationToken),
             "export-onnx" => await _export.ExecuteAsync("export-onnx", context, cancellationToken),
             "export-center" => await _export.ExecuteAsync("export-center", context, cancellationToken),
             "infer" => await _inference.ExecuteAsync(parsed.Sub ?? string.Empty, context, cancellationToken),
@@ -69,7 +70,7 @@ public sealed class PocrApp
             return 0;
         }
 
-        _logger.LogError(result.Message);
+        Console.Error.WriteLine(result.Message);
         return 2;
     }
 

@@ -15,6 +15,13 @@ internal sealed class TrainingConfigView
     public int EpochNum => GetInt("Global.epoch_num", 1);
     public int BatchSize => GetInt("Train.loader.batch_size_per_card", 16);
     public int EvalBatchSize => GetInt("Eval.loader.batch_size_per_card", BatchSize);
+    public int PrintBatchStep => Math.Max(1, GetInt("Global.print_batch_step", 10));
+    public int LogSmoothWindow => Math.Max(1, GetInt("Global.log_smooth_window", 20));
+    public int SaveEpochStep => Math.Max(1, GetInt("Global.save_epoch_step", 1));
+    public bool SaveBatchModel => GetBool("Global.save_batch_model", true);
+    public (int Start, int Interval) EvalBatchStep => ParseEvalBatchStep();
+    public bool CalMetricDuringTrain => GetBool("Global.cal_metric_during_train", true);
+    public int CalcEpochInterval => Math.Max(1, GetInt("Global.calc_epoch_interval", 1));
     public float LearningRate => GetFloat("Optimizer.lr.learning_rate", 1e-3f);
     public int LrDecayStep => GetInt("Optimizer.lr.step_size", 0);
     public float LrDecayGamma => GetFloat("Optimizer.lr.gamma", 0.1f);
@@ -413,5 +420,18 @@ internal sealed class TrainingConfigView
     public object? GetByPathPublic(string path)
     {
         return GetByPath(path);
+    }
+
+    private (int Start, int Interval) ParseEvalBatchStep()
+    {
+        var raw = GetByPath("Global.eval_batch_step");
+        if (raw is IList<object?> list && list.Count >= 2 &&
+            int.TryParse(list[0]?.ToString(), out var start) &&
+            int.TryParse(list[1]?.ToString(), out var interval))
+        {
+            return (Math.Max(0, start), Math.Max(1, interval));
+        }
+
+        return (0, 2000);
     }
 }

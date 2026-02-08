@@ -53,11 +53,11 @@ try
 }
 catch (PocrException ex)
 {
-    logger.LogError(ex.Message);
+    Console.Error.WriteLine(ex.Message);
     Environment.ExitCode = 2;
 }
 catch (Exception ex)
 {
-    logger.LogError(ex, "Unhandled error");
+    Console.Error.WriteLine(ex.ToString());
     Environment.ExitCode = 1;
 }

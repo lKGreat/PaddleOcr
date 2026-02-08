@@ -95,6 +95,7 @@ public static class CommandLine
                  train -c <config> [-o K=V ...]
                  eval -c <config> [-o K=V ...]
                  export -c <config> [-o K=V ...]
+                 export-pdmodel -c <config> [--static_equivalence strict|compatible] [--paddle_export_source paddle|onnx] [-o K=V ...]
                  export-onnx -c <config> [-o K=V ...]
                  export-center -c <config> [-o K=V ...]
                  infer <det|rec|cls|e2e|kie|kie-ser|kie-re|table|sr|system> [-c <config>] [options]
@@ -108,7 +109,7 @@ public static class CommandLine
                  doctor det-parity -c <config>
                  doctor train-det-ready -c <config>
                  service test --server_url <url> --image_dir <dir> [--parallel N --timeout_ms MS --retries N --stress_rounds N --dump_failures true]
-                 e2e <convert-label|eval> [args]
+                 e2e <convert-label|eval|prepare-rec-det> [args]
                  benchmark run --scenario <infer:system|service:test|e2e:eval|export:export-onnx|train:train> [--profile smoke|balanced|stress] [--warmup N --iterations N --continue_on_error true --report_json <path>] [scenario options...]
                  plugin <validate-package|verify-trust|load-runtime|load-runtime-dir> [--package_dir <dir>] [--plugins_root <dir>] [--require_trust true] [--allow_untrusted true]
                """;

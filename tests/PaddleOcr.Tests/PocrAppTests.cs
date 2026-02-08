@@ -88,6 +88,32 @@ public sealed class PocrAppTests
     }
 
     [Fact]
+    public async Task RunAsync_Should_Route_ExportPdmodel_To_Export()
+    {
+        var export = new ProbeExecutor("export");
+        var app = new PocrApp(
+            NullLogger.Instance,
+            new ConfigLoader(),
+            new ProbeExecutor("training"),
+            new ProbeExecutor("inference"),
+            export,
+            new ProbeExecutor("service"),
+            new ProbeExecutor("e2e"),
+            new ProbeExecutor("benchmark"),
+            new ProbeExecutor("plugin"));
+
+        var dir = Path.Combine(Path.GetTempPath(), "pocr_exportpd_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var cfg = Path.Combine(dir, "cfg.yml");
+        await File.WriteAllTextAsync(cfg, "Architecture:\n  model_type: rec\nGlobal:\n  save_model_dir: ./out\n");
+
+        var code = await app.RunAsync(["export-pdmodel", "-c", cfg]);
+
+        code.Should().Be(0);
+        export.Calls.Should().ContainSingle(c => c == "export-pdmodel");
+    }
+
+    [Fact]
     public async Task RunAsync_ConfigCheck_Should_Validate_Config()
     {
         var dir = Path.Combine(Path.GetTempPath(), "pocr_cfg_" + Guid.NewGuid().ToString("N"));

@@ -3,6 +3,11 @@ using System.Drawing;
 using System.Text;
 using System.Text.Json;
 using PaddleOcr.Core.Cli;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Jpeg;
+using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
+using DrawingPointF = System.Drawing.PointF;
 
 namespace PaddleOcr.Data;
 
@@ -53,7 +58,268 @@ public sealed class E2eToolsExecutor : ICommandExecutor
             return Task.FromResult(CommandResult.Ok(message));
         }
 
+        if (subCommand.Equals("prepare-rec-det", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!context.Options.TryGetValue("--label_path", out var labelPath) ||
+                !context.Options.TryGetValue("--image_root", out var imageRoot) ||
+                !context.Options.TryGetValue("--output_dir", out var outputDir))
+            {
+                return Task.FromResult(CommandResult.Fail("e2e prepare-rec-det requires --label_path --image_root --output_dir"));
+            }
+
+            var trainRatio = ParseFloat(context.Options, "--train_ratio", 0.9f);
+            trainRatio = Math.Clamp(trainRatio, 0.5f, 0.99f);
+            var seed = ParseInt(context.Options, "--seed", 42);
+            var maxSamples = ParseInt(context.Options, "--max_samples", 0);
+            var valLabelPath = context.Options.TryGetValue("--val_label_path", out var vl) ? vl : null;
+            var prepared = PrepareRecDatasetFromDet(labelPath, valLabelPath, imageRoot, outputDir, trainRatio, seed, maxSamples);
+            var msg =
+                $"e2e prepare-rec-det completed: total={prepared.TotalSamples}, train={prepared.TrainSamples}, val={prepared.ValSamples}, " +
+                $"skipped={prepared.SkippedAnnotations}, output={prepared.OutputDir}";
+            return Task.FromResult(CommandResult.Ok(msg));
+        }
+
         return Task.FromResult(CommandResult.Fail($"Unsupported e2e subcommand: {subCommand}"));
+    }
+
+    private static RecPreparedSummary PrepareRecDatasetFromDet(
+        string labelPath,
+        string? valLabelPath,
+        string imageRoot,
+        string outputDir,
+        float trainRatio,
+        int seed,
+        int maxSamples)
+    {
+        if (!File.Exists(labelPath))
+        {
+            throw new FileNotFoundException($"label file not found: {labelPath}");
+        }
+
+        if (!Directory.Exists(imageRoot))
+        {
+            throw new DirectoryNotFoundException($"image_root not found: {imageRoot}");
+        }
+
+        var imagesDir = Path.Combine(outputDir, "images");
+        Directory.CreateDirectory(outputDir);
+        Directory.CreateDirectory(imagesDir);
+
+        var saved = 0;
+        var skipped = 0;
+        var trainEntries = CollectRecEntries(labelPath, imageRoot, imagesDir, maxSamples, ref saved, ref skipped);
+        string[] train;
+        string[] val;
+
+        if (!string.IsNullOrWhiteSpace(valLabelPath))
+        {
+            if (!File.Exists(valLabelPath))
+            {
+                throw new FileNotFoundException($"val label file not found: {valLabelPath}");
+            }
+
+            var valEntries = CollectRecEntries(valLabelPath, imageRoot, imagesDir, maxSamples: 0, ref saved, ref skipped);
+            if (trainEntries.Count == 0 || valEntries.Count == 0)
+            {
+                throw new InvalidOperationException("No rec samples generated for train/val from detection labels.");
+            }
+
+            train = trainEntries.ToArray();
+            val = valEntries.ToArray();
+        }
+        else
+        {
+            if (trainEntries.Count == 0)
+            {
+                throw new InvalidOperationException("No rec samples generated from detection labels.");
+            }
+
+            var entries = trainEntries;
+            var rng = new Random(seed);
+            for (var i = entries.Count - 1; i > 0; i--)
+            {
+                var j = rng.Next(i + 1);
+                (entries[i], entries[j]) = (entries[j], entries[i]);
+            }
+
+            var trainCount = entries.Count == 1
+                ? 1
+                : Math.Clamp((int)Math.Round(entries.Count * trainRatio), 1, entries.Count - 1);
+            train = entries.Take(trainCount).ToArray();
+            val = entries.Skip(trainCount).ToArray();
+        }
+
+        File.WriteAllLines(Path.Combine(outputDir, "train_list.txt"), train, new UTF8Encoding(false));
+        File.WriteAllLines(Path.Combine(outputDir, "val_list.txt"), val, new UTF8Encoding(false));
+
+        var summary = new RecPreparedSummary(outputDir, train.Length + val.Length, train.Length, val.Length, skipped);
+        var summaryJson = JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true });
+        File.WriteAllText(Path.Combine(outputDir, "prepare_rec_summary.json"), summaryJson);
+        return summary;
+    }
+
+    private static List<string> CollectRecEntries(
+        string labelPath,
+        string imageRoot,
+        string imagesDir,
+        int maxSamples,
+        ref int saved,
+        ref int skipped)
+    {
+        var entries = new List<string>();
+        foreach (var line in File.ReadLines(labelPath))
+        {
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            var split = line.Split('\t', 2);
+            if (split.Length != 2)
+            {
+                split = line.Split("    ", 2, StringSplitOptions.None);
+                if (split.Length != 2)
+                {
+                    continue;
+                }
+            }
+
+            var rawImagePath = split[0].Trim();
+            var fullImagePath = Path.IsPathRooted(rawImagePath)
+                ? rawImagePath
+                : Path.GetFullPath(Path.Combine(imageRoot, rawImagePath));
+            if (!File.Exists(fullImagePath))
+            {
+                skipped++;
+                continue;
+            }
+
+            using var image = Image.Load<Rgb24>(fullImagePath);
+            using var doc = JsonDocument.Parse(split[1]);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array)
+            {
+                skipped++;
+                continue;
+            }
+
+            foreach (var ann in doc.RootElement.EnumerateArray())
+            {
+                if (!ann.TryGetProperty("transcription", out var txtEl))
+                {
+                    skipped++;
+                    continue;
+                }
+
+                var text = SanitizeRecText(txtEl.GetString() ?? string.Empty);
+                if (string.IsNullOrWhiteSpace(text) || text == "###")
+                {
+                    skipped++;
+                    continue;
+                }
+
+                if (!ann.TryGetProperty("points", out var pointsEl) || pointsEl.ValueKind != JsonValueKind.Array)
+                {
+                    skipped++;
+                    continue;
+                }
+
+                if (!TryGetCropRect(pointsEl, image.Width, image.Height, out var cropRect))
+                {
+                    skipped++;
+                    continue;
+                }
+
+                var cropName = $"{Path.GetFileNameWithoutExtension(fullImagePath)}_{saved:D7}.jpg";
+                var cropPath = Path.Combine(imagesDir, cropName);
+                using var crop = image.Clone(ctx => ctx.Crop(cropRect));
+                crop.Save(cropPath, new JpegEncoder { Quality = 95 });
+                entries.Add($"images/{cropName}\t{text}");
+                saved++;
+
+                if (maxSamples > 0 && saved >= maxSamples)
+                {
+                    break;
+                }
+            }
+
+            if (maxSamples > 0 && saved >= maxSamples)
+            {
+                break;
+            }
+        }
+
+        return entries;
+    }
+
+    private static bool TryGetCropRect(JsonElement pointsEl, int imageW, int imageH, out SixLabors.ImageSharp.Rectangle rect)
+    {
+        var xs = new List<float>(8);
+        var ys = new List<float>(8);
+        foreach (var point in pointsEl.EnumerateArray())
+        {
+            if (point.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+
+            var p = point.EnumerateArray().ToArray();
+            if (p.Length < 2)
+            {
+                continue;
+            }
+
+            if (!p[0].TryGetSingle(out var x) || !p[1].TryGetSingle(out var y))
+            {
+                continue;
+            }
+
+            xs.Add(x);
+            ys.Add(y);
+        }
+
+        if (xs.Count == 0 || ys.Count == 0)
+        {
+            rect = default;
+            return false;
+        }
+
+        var minX = Math.Max(0, (int)Math.Floor(xs.Min()));
+        var minY = Math.Max(0, (int)Math.Floor(ys.Min()));
+        var maxX = Math.Min(imageW - 1, (int)Math.Ceiling(xs.Max()));
+        var maxY = Math.Min(imageH - 1, (int)Math.Ceiling(ys.Max()));
+
+        var width = maxX - minX + 1;
+        var height = maxY - minY + 1;
+        if (width < 4 || height < 4)
+        {
+            rect = default;
+            return false;
+        }
+
+        rect = new SixLabors.ImageSharp.Rectangle(minX, minY, width, height);
+        return true;
+    }
+
+    private static string SanitizeRecText(string text)
+    {
+        return text
+            .Replace('\t', ' ')
+            .Replace('\r', ' ')
+            .Replace('\n', ' ')
+            .Trim();
+    }
+
+    private static int ParseInt(IReadOnlyDictionary<string, string> options, string key, int fallback)
+    {
+        return options.TryGetValue(key, out var raw) && int.TryParse(raw, out var v) ? v : fallback;
+    }
+
+    private static float ParseFloat(IReadOnlyDictionary<string, string> options, string key, float fallback)
+    {
+        return options.TryGetValue(key, out var raw) &&
+               float.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var v)
+            ? v
+            : fallback;
     }
 
     private static (string? GtDir, string? PredDir) ResolveEvalDirs(PaddleOcr.Core.Cli.ExecutionContext context)
@@ -439,20 +705,20 @@ public sealed class E2eToolsExecutor : ICommandExecutor
         return union <= 1e-6f ? 0f : interArea / union;
     }
 
-    private static List<PointF> ToPoints(float[] coords)
+    private static List<DrawingPointF> ToPoints(float[] coords)
     {
-        var points = new List<PointF>(coords.Length / 2);
+        var points = new List<DrawingPointF>(coords.Length / 2);
         for (var i = 0; i + 1 < coords.Length; i += 2)
         {
-            points.Add(new PointF(coords[i], coords[i + 1]));
+            points.Add(new DrawingPointF(coords[i], coords[i + 1]));
         }
 
         return points;
     }
 
-    private static List<PointF> IntersectConvex(List<PointF> subject, List<PointF> clip)
+    private static List<DrawingPointF> IntersectConvex(List<DrawingPointF> subject, List<DrawingPointF> clip)
     {
-        var output = new List<PointF>(subject);
+        var output = new List<DrawingPointF>(subject);
         for (var i = 0; i < clip.Count; i++)
         {
             var cp1 = clip[i];
@@ -488,15 +754,15 @@ public sealed class E2eToolsExecutor : ICommandExecutor
         return output;
     }
 
-    private static bool Inside(PointF p, PointF a, PointF b)
+    private static bool Inside(DrawingPointF p, DrawingPointF a, DrawingPointF b)
     {
         return ((b.X - a.X) * (p.Y - a.Y) - (b.Y - a.Y) * (p.X - a.X)) >= 0f;
     }
 
-    private static PointF Intersection(PointF s, PointF e, PointF a, PointF b)
+    private static DrawingPointF Intersection(DrawingPointF s, DrawingPointF e, DrawingPointF a, DrawingPointF b)
     {
-        var dc = new PointF(a.X - b.X, a.Y - b.Y);
-        var dp = new PointF(s.X - e.X, s.Y - e.Y);
+        var dc = new DrawingPointF(a.X - b.X, a.Y - b.Y);
+        var dp = new DrawingPointF(s.X - e.X, s.Y - e.Y);
         var n1 = a.X * b.Y - a.Y * b.X;
         var n2 = s.X * e.Y - s.Y * e.X;
         var n3 = dc.X * dp.Y - dc.Y * dp.X;
@@ -505,10 +771,10 @@ public sealed class E2eToolsExecutor : ICommandExecutor
             return e;
         }
 
-        return new PointF((n1 * dp.X - n2 * dc.X) / n3, (n1 * dp.Y - n2 * dc.Y) / n3);
+        return new DrawingPointF((n1 * dp.X - n2 * dc.X) / n3, (n1 * dp.Y - n2 * dc.Y) / n3);
     }
 
-    private static float PolygonArea(List<PointF> pts)
+    private static float PolygonArea(List<DrawingPointF> pts)
     {
         if (pts.Count < 3)
         {
@@ -546,4 +812,5 @@ public sealed class E2eToolsExecutor : ICommandExecutor
     private sealed record E2eSummary(float IouThreshold, float Precision, float Recall, float Fmeasure, float CharacterAccuracy, float AvgEditDistField, float AvgEditDistImg, int GtCount, int DtCount);
     private sealed record E2eFileDetail(string FileName, float IouThreshold, int Hit, int GtCount, int DtCount);
     private sealed record E2eEvalResult(IReadOnlyList<E2eSummary> Summaries, IReadOnlyList<E2eFileDetail> Files);
+    private sealed record RecPreparedSummary(string OutputDir, int TotalSamples, int TrainSamples, int ValSamples, int SkippedAnnotations);
 }

@@ -12,6 +12,7 @@ public sealed class ExportExecutor : ICommandExecutor
     private static readonly HashSet<string> Supported = new(StringComparer.OrdinalIgnoreCase)
     {
         "export",
+        "export-pdmodel",
         "export-onnx",
         "export-center",
         "convert:json2pdmodel",
@@ -26,6 +27,7 @@ public sealed class ExportExecutor : ICommandExecutor
         }
 
         if (!subCommand.Equals("convert:json2pdmodel", StringComparison.OrdinalIgnoreCase) &&
+            !subCommand.Equals("convert:check-json-model", StringComparison.OrdinalIgnoreCase) &&
             string.IsNullOrWhiteSpace(context.ConfigPath))
         {
             return Task.FromResult(CommandResult.Fail($"{subCommand} requires -c/--config"));
@@ -65,6 +67,18 @@ public sealed class ExportExecutor : ICommandExecutor
             }
 
             var cfg = new ExportConfigView(context.Config, context.ConfigPath!);
+            if (subCommand.Equals("export-pdmodel", StringComparison.OrdinalIgnoreCase))
+            {
+                var staticEquivalence = context.Options.TryGetValue("--static_equivalence", out var sem)
+                    ? sem
+                    : cfg.StaticEquivalence;
+                var source = context.Options.TryGetValue("--paddle_export_source", out var src)
+                    ? src
+                    : cfg.PaddleExportSource;
+                var outFile = exporter.ExportPaddleStatic(cfg, staticEquivalence, source);
+                return Task.FromResult(CommandResult.Ok($"export-pdmodel completed. output={outFile}"));
+            }
+
             if (subCommand.Equals("export-onnx", StringComparison.OrdinalIgnoreCase))
             {
                 try

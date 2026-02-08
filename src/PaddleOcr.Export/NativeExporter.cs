@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text;
+using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Microsoft.ML.OnnxRuntime;
 
@@ -62,6 +63,101 @@ public sealed class NativeExporter
         return target;
     }
 
+    public string ExportPaddleStatic(ExportConfigView cfg)
+    {
+        return ExportPaddleStatic(cfg, cfg.StaticEquivalence, cfg.PaddleExportSource);
+    }
+
+    public string ExportPaddleStatic(ExportConfigView cfg, string staticEquivalence, string paddleExportSource)
+    {
+        staticEquivalence = NormalizeMode(staticEquivalence, "strict", "compatible");
+        paddleExportSource = NormalizeMode(paddleExportSource, "paddle", "onnx");
+
+        if (paddleExportSource.Equals("onnx", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "Pure native C# mode does not support onnx->paddle static conversion yet. " +
+                "Use --paddle_export_source paddle with an existing Paddle static source.");
+        }
+
+        if (staticEquivalence.Equals("strict", StringComparison.OrdinalIgnoreCase))
+        {
+            return ExportPaddleStaticStrict(cfg);
+        }
+
+        return ExportPaddleStaticCompatibleFromPaddle(cfg);
+    }
+
+    private string ExportPaddleStaticCompatibleFromPaddle(ExportConfigView cfg)
+    {
+        var outPath = ExportPaddleStaticStrict(cfg);
+        var manifestPath = Path.Combine(cfg.SaveInferenceDir, "manifest.json");
+        var old = JsonSerializer.Deserialize<ExportManifest>(File.ReadAllText(manifestPath));
+        if (old is null)
+        {
+            throw new InvalidOperationException("failed to load manifest for compatible rewrite");
+        }
+
+        var rewritten = old with
+        {
+            StaticEquivalence = "compatible",
+            ConversionChain = "paddle_export_native"
+        };
+        WriteManifest(cfg.SaveInferenceDir, rewritten);
+        ValidateManifestOrThrow(cfg.SaveInferenceDir);
+        return outPath;
+    }
+
+    private string ExportPaddleStaticStrict(ExportConfigView cfg)
+    {
+        Directory.CreateDirectory(cfg.SaveInferenceDir);
+        var source = ResolvePaddleSource(cfg);
+        if (source is null)
+        {
+            throw new FileNotFoundException(
+                "No Paddle static source found for strict export. " +
+                "Set Global.pretrained_model to a Paddle inference dir (inference.json + inference.pdiparams), " +
+                "or set Global.checkpoints to inference.json.");
+        }
+        var (graphSource, paramsSource) = PickPaddleStaticArtifacts(source);
+        var graphExt = Path.GetExtension(graphSource).ToLowerInvariant();
+        var graphTarget = graphExt == ".json"
+            ? Path.Combine(cfg.SaveInferenceDir, "inference.json")
+            : Path.Combine(cfg.SaveInferenceDir, "inference.pdmodel");
+        var paramsTarget = Path.Combine(cfg.SaveInferenceDir, "inference.pdiparams");
+        File.Copy(graphSource, graphTarget, overwrite: true);
+        File.Copy(paramsSource, paramsTarget, overwrite: true);
+
+        var ymlPath = Path.Combine(cfg.SaveInferenceDir, "inference.yml");
+        var sourceYml = ResolvePaddleYamlPath(source);
+        if (!string.IsNullOrWhiteSpace(sourceYml) && File.Exists(sourceYml))
+        {
+            File.Copy(sourceYml, ymlPath, overwrite: true);
+        }
+        else if (!File.Exists(ymlPath))
+        {
+            File.WriteAllText(ymlPath, BuildInferenceYaml(cfg));
+        }
+        CopyDictIfNeeded(cfg);
+
+        var manifest = BuildManifest(
+            cfg,
+            "paddle-static",
+            DateTime.UtcNow,
+            Path.GetFileName(graphTarget),
+            checkpoint: cfg.Checkpoints,
+            source: source,
+            sourceDirectory: Directory.Exists(source) ? source : Path.GetDirectoryName(source),
+            onnxInputs: null,
+            onnxOutputs: null,
+            staticEquivalence: "strict",
+            conversionChain: "paddle_export_native");
+        WriteManifest(cfg.SaveInferenceDir, manifest);
+        ValidateManifestOrThrow(cfg.SaveInferenceDir);
+        _logger.LogInformation("Exported strict paddle static model: {Dir}", cfg.SaveInferenceDir);
+        return graphTarget;
+    }
+
     public string ConvertJsonToPdmodel(string jsonModelDir, string outputDir)
     {
         if (!Directory.Exists(jsonModelDir))
@@ -99,7 +195,9 @@ public sealed class NativeExporter
                 DetInputSize: null,
                 Compatibility: new ExportCompatibility("1.x", "shim", true),
                 OnnxInputs: [],
-                OnnxOutputs: []));
+                OnnxOutputs: [],
+                StaticEquivalence: "compatible",
+                ConversionChain: "json_pdmodel_shim"));
         ValidateManifestOrThrow(outputDir);
         _logger.LogInformation("Converted json model dir to pdmodel shim: {Dir}", outputDir);
         return dstModel;
@@ -191,7 +289,9 @@ public sealed class NativeExporter
         string? source,
         string? sourceDirectory,
         IReadOnlyList<ExportTensorInfo>? onnxInputs,
-        IReadOnlyList<ExportTensorInfo>? onnxOutputs)
+        IReadOnlyList<ExportTensorInfo>? onnxOutputs,
+        string staticEquivalence = "compatible",
+        string conversionChain = "native")
     {
         return new ExportManifest(
             SchemaVersion: "1.0",
@@ -208,7 +308,9 @@ public sealed class NativeExporter
             DetInputSize: cfg.DetInputSize,
             Compatibility: new ExportCompatibility("1.x", "native", true),
             OnnxInputs: onnxInputs ?? [],
-            OnnxOutputs: onnxOutputs ?? []);
+            OnnxOutputs: onnxOutputs ?? [],
+            StaticEquivalence: staticEquivalence,
+            ConversionChain: conversionChain);
     }
 
     private static (IReadOnlyList<ExportTensorInfo> Inputs, IReadOnlyList<ExportTensorInfo> Outputs) GetOnnxIoMetadata(string onnxPath)
@@ -228,6 +330,77 @@ public sealed class NativeExporter
         if (!ValidateManifestFile(dir, out var message))
         {
             throw new InvalidOperationException($"manifest validation failed: {message}");
+        }
+    }
+
+    private static string ResolveScriptPath(string scriptName)
+    {
+        var cwdCandidate = Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "scripts", scriptName));
+        if (File.Exists(cwdCandidate))
+        {
+            return cwdCandidate;
+        }
+
+        var baseCandidate = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "scripts", scriptName));
+        if (File.Exists(baseCandidate))
+        {
+            return baseCandidate;
+        }
+
+        return cwdCandidate;
+    }
+
+    private static ProcessRunResult TryRunPython(string args)
+    {
+        var attempts = new[]
+        {
+            ("python", args),
+            ("py", $"-3 {args}")
+        };
+
+        foreach (var (fileName, commandArgs) in attempts)
+        {
+            var run = RunProcess(fileName, commandArgs);
+            if (run.Success)
+            {
+                return run;
+            }
+        }
+
+        return RunProcess("python", args);
+    }
+
+    private static ProcessRunResult RunProcess(string fileName, string args)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = fileName,
+                Arguments = args,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var process = Process.Start(psi);
+            if (process is null)
+            {
+                return new ProcessRunResult(false, string.Empty, $"failed to start process: {fileName}");
+            }
+
+            var stdOutTask = process.StandardOutput.ReadToEndAsync();
+            var stdErrTask = process.StandardError.ReadToEndAsync();
+            process.WaitForExit();
+            Task.WaitAll(stdOutTask, stdErrTask);
+            var stdOut = stdOutTask.Result;
+            var stdErr = stdErrTask.Result;
+            return new ProcessRunResult(process.ExitCode == 0, stdOut, stdErr);
+        }
+        catch (Exception ex)
+        {
+            return new ProcessRunResult(false, string.Empty, ex.Message);
         }
     }
 
@@ -382,6 +555,88 @@ public sealed class NativeExporter
         return null;
     }
 
+    private static string? ResolvePaddleYamlPath(string source)
+    {
+        if (Directory.Exists(source))
+        {
+            var yml = Path.Combine(source, "inference.yml");
+            return File.Exists(yml) ? yml : null;
+        }
+
+        var dir = Path.GetDirectoryName(source);
+        if (string.IsNullOrWhiteSpace(dir))
+        {
+            return null;
+        }
+
+        var fromDir = Path.Combine(dir, "inference.yml");
+        return File.Exists(fromDir) ? fromDir : null;
+    }
+
+    private static (string GraphPath, string ParamsPath) PickPaddleStaticArtifacts(string source)
+    {
+        source = Path.GetFullPath(source);
+        if (Directory.Exists(source))
+        {
+            var graph = FirstExisting([
+                Path.Combine(source, "inference.json"),
+                Path.Combine(source, "inference.pdmodel"),
+                Path.Combine(source, "model.json"),
+                Path.Combine(source, "model.pdmodel")
+            ]);
+            var parms = FirstExisting([
+                Path.Combine(source, "inference.pdiparams"),
+                Path.Combine(source, "model.pdiparams"),
+                Path.Combine(source, "model.pdparams")
+            ]);
+            if (!string.IsNullOrWhiteSpace(graph) && !string.IsNullOrWhiteSpace(parms))
+            {
+                return (graph, parms);
+            }
+
+            throw new FileNotFoundException($"missing Paddle graph/params in directory: {source}");
+        }
+
+        if (!File.Exists(source))
+        {
+            throw new FileNotFoundException($"Paddle source does not exist: {source}");
+        }
+
+        var ext = Path.GetExtension(source).ToLowerInvariant();
+        if (ext is not (".json" or ".pdmodel"))
+        {
+            throw new InvalidOperationException($"unsupported Paddle static source file: {source}");
+        }
+
+        var dir = Path.GetDirectoryName(source) ?? Directory.GetCurrentDirectory();
+        var baseName = Path.Combine(dir, Path.GetFileNameWithoutExtension(source));
+        var parmsPath = FirstExisting([
+            baseName + ".pdiparams",
+            Path.Combine(dir, "inference.pdiparams"),
+            Path.Combine(dir, "model.pdiparams"),
+            Path.Combine(dir, "model.pdparams")
+        ]);
+        if (string.IsNullOrWhiteSpace(parmsPath))
+        {
+            throw new FileNotFoundException($"cannot find pdiparams for source: {source}");
+        }
+
+        return (source, parmsPath);
+    }
+
+    private static string? FirstExisting(IEnumerable<string> candidates)
+    {
+        foreach (var candidate in candidates)
+        {
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
     private static List<string> LoadDictTokens(string? dictPath)
     {
         var tokens = new List<string>();
@@ -473,7 +728,51 @@ public sealed class NativeExporter
 
         return null;
     }
+
+    private static string? ResolvePaddleSource(ExportConfigView cfg)
+    {
+        if (!string.IsNullOrWhiteSpace(cfg.PretrainedModel))
+        {
+            if (Directory.Exists(cfg.PretrainedModel))
+            {
+                return cfg.PretrainedModel;
+            }
+
+            if (File.Exists(cfg.PretrainedModel) &&
+                (cfg.PretrainedModel.EndsWith(".json", StringComparison.OrdinalIgnoreCase) ||
+                 cfg.PretrainedModel.EndsWith(".pdmodel", StringComparison.OrdinalIgnoreCase)))
+            {
+                return cfg.PretrainedModel;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(cfg.Checkpoints) &&
+            File.Exists(cfg.Checkpoints) &&
+            (cfg.Checkpoints.EndsWith(".json", StringComparison.OrdinalIgnoreCase) ||
+             cfg.Checkpoints.EndsWith(".pdmodel", StringComparison.OrdinalIgnoreCase)))
+        {
+            return cfg.Checkpoints;
+        }
+
+        return null;
+    }
+
+    private static string NormalizeMode(string? value, params string[] allowed)
+    {
+        var text = value?.Trim().ToLowerInvariant() ?? string.Empty;
+        foreach (var candidate in allowed)
+        {
+            if (text.Equals(candidate, StringComparison.OrdinalIgnoreCase))
+            {
+                return candidate;
+            }
+        }
+
+        return allowed[0];
+    }
 }
+
+internal sealed record ProcessRunResult(bool Success, string StdOut, string StdErr);
 
 public sealed record ExportManifest(
     string SchemaVersion,
@@ -490,7 +789,9 @@ public sealed record ExportManifest(
     int? DetInputSize,
     ExportCompatibility Compatibility,
     IReadOnlyList<ExportTensorInfo> OnnxInputs,
-    IReadOnlyList<ExportTensorInfo> OnnxOutputs);
+    IReadOnlyList<ExportTensorInfo> OnnxOutputs,
+    string? StaticEquivalence,
+    string? ConversionChain);
 
 public sealed record ExportCompatibility(string ManifestSemVer, string Runtime, bool BackwardCompatible);
 public sealed record ExportTensorInfo(string Name, IReadOnlyList<int> Dims);

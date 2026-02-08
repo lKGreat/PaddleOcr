@@ -265,7 +265,9 @@ public sealed class OnnxModelExporter
             DetInputSize: cfg.DetInputSize,
             Compatibility: new ExportCompatibility("1.x", "native", true),
             OnnxInputs: onnxInputs ?? [],
-            OnnxOutputs: onnxOutputs ?? []);
+            OnnxOutputs: onnxOutputs ?? [],
+            StaticEquivalence: "compatible",
+            ConversionChain: "torch_onnx");
     }
 
     private static void WriteManifest(string dir, object manifest)

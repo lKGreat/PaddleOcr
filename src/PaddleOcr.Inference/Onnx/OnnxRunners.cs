@@ -323,6 +323,9 @@ public sealed class RecOnnxRunner
         var inputName = rec.InputMetadata.First().Key;
 
         var lines = new List<string>(imageFiles.Count);
+        var recTrace = new List<RecTraceItem>(imageFiles.Count);
+        var fallbackCount = 0;
+        var totalWatch = Stopwatch.StartNew();
 
         // 按 batch 分批处理
         for (var batchStart = 0; batchStart < imageFiles.Count; batchStart += batchSize)
@@ -331,12 +334,15 @@ public sealed class RecOnnxRunner
             var currentBatchSize = batchEnd - batchStart;
 
             // 预处理批次中的所有图像
+            var preprocessWatch = Stopwatch.StartNew();
             var batchPreResults = new Rec.RecPreprocessResult[currentBatchSize];
             for (var i = 0; i < currentBatchSize; i++)
             {
                 using var img = Image.Load<Rgb24>(imageFiles[batchStart + i]);
                 batchPreResults[i] = preprocessor.Process(img, targetC, targetH, targetW);
             }
+            preprocessWatch.Stop();
+            var preprocessPerImageMs = preprocessWatch.Elapsed.TotalMilliseconds / Math.Max(1, currentBatchSize);
 
             // 检查模型是否接受 valid_ratio 额外输入
             var hasValidRatioInput = rec.InputMetadata.ContainsKey("valid_ratio");
@@ -355,10 +361,20 @@ public sealed class RecOnnxRunner
                     inputs.Add(NamedOnnxValue.CreateFromTensor("valid_ratio", vrTensor));
                 }
 
+                var inferWatch = Stopwatch.StartNew();
                 using var outputs = rec.Run(inputs);
+                inferWatch.Stop();
                 var outTensor = outputs.First().AsTensor<float>();
                 var recRes = recPost(outTensor.ToArray(), outTensor.Dimensions.ToArray(), charset);
                 AppendResult(lines, imageFiles[batchStart], recRes, options.DropScore);
+                recTrace.Add(new RecTraceItem(
+                    Path.GetFileName(imageFiles[batchStart]),
+                    preprocessPerImageMs,
+                    inferWatch.Elapsed.TotalMilliseconds,
+                    0d,
+                    false,
+                    recRes.Score,
+                    recRes.Text.Length));
             }
             else
             {
@@ -381,10 +397,13 @@ public sealed class RecOnnxRunner
                 // 如果模型支持动态 batch，一次推理整个 batch
                 try
                 {
+                    var inferWatch = Stopwatch.StartNew();
                     using var batchOutputs = rec.Run(batchInputs);
+                    inferWatch.Stop();
                     var batchOutTensor = batchOutputs.First().AsTensor<float>();
                     var batchOutDims = batchOutTensor.Dimensions.ToArray();
                     var batchOutData = batchOutTensor.ToArray();
+                    var inferPerImageMs = inferWatch.Elapsed.TotalMilliseconds / Math.Max(1, currentBatchSize);
 
                     // 按样本拆分输出
                     if (batchOutDims.Length >= 2 && batchOutDims[0] == currentBatchSize)
@@ -400,23 +419,37 @@ public sealed class RecOnnxRunner
                             Array.Copy(batchOutData, i * perSampleSize, sampleData, 0, perSampleSize);
                             var recRes = recPost(sampleData, singleOutDims, charset);
                             AppendResult(lines, imageFiles[batchStart + i], recRes, options.DropScore);
+                            recTrace.Add(new RecTraceItem(
+                                Path.GetFileName(imageFiles[batchStart + i]),
+                                preprocessPerImageMs,
+                                inferPerImageMs,
+                                0d,
+                                false,
+                                recRes.Score,
+                                recRes.Text.Length));
                         }
                     }
                     else
                     {
                         // 如果输出维度不匹配，回退到逐个解码
-                        FallbackSingleInference(rec, inputName, batchPreResults, imageFiles, batchStart, currentBatchSize, recPost, charset, options.DropScore, lines);
+                        fallbackCount += currentBatchSize;
+                        FallbackSingleInference(rec, inputName, batchPreResults, imageFiles, batchStart, currentBatchSize, recPost, charset, options.DropScore, lines, recTrace, preprocessPerImageMs);
                     }
                 }
                 catch
                 {
                     // 如果模型不支持动态 batch，回退到逐个推理
-                    FallbackSingleInference(rec, inputName, batchPreResults, imageFiles, batchStart, currentBatchSize, recPost, charset, options.DropScore, lines);
+                    fallbackCount += currentBatchSize;
+                    FallbackSingleInference(rec, inputName, batchPreResults, imageFiles, batchStart, currentBatchSize, recPost, charset, options.DropScore, lines, recTrace, preprocessPerImageMs);
                 }
             }
         }
 
         File.WriteAllLines(Path.Combine(options.OutputDir, "rec_results.txt"), lines);
+        if (options.RecLogDetail)
+        {
+            WriteRecProfile(options.OutputDir, imageFiles.Count, recTrace, fallbackCount, totalWatch.Elapsed.TotalMilliseconds);
+        }
     }
 
     private static void FallbackSingleInference(
@@ -429,7 +462,9 @@ public sealed class RecOnnxRunner
         Func<float[], int[], IReadOnlyList<string>, Models.RecResult> recPost,
         IReadOnlyList<string> charset,
         float dropScore,
-        List<string> lines)
+        List<string> lines,
+        List<RecTraceItem> traces,
+        double preprocessPerImageMs)
     {
         // 检查模型是否接受 valid_ratio 额外输入（SAR/RobustScanner/SATRN 等算法需要）
         var hasValidRatioInput = rec.InputMetadata.ContainsKey("valid_ratio");
@@ -448,10 +483,20 @@ public sealed class RecOnnxRunner
                 inputs.Add(NamedOnnxValue.CreateFromTensor("valid_ratio", vrTensor));
             }
 
+            var inferWatch = Stopwatch.StartNew();
             using var outputs = rec.Run(inputs);
+            inferWatch.Stop();
             var outTensor = outputs.First().AsTensor<float>();
             var recRes = recPost(outTensor.ToArray(), outTensor.Dimensions.ToArray(), charset);
             AppendResult(lines, imageFiles[batchStart + i], recRes, dropScore);
+            traces.Add(new RecTraceItem(
+                Path.GetFileName(imageFiles[batchStart + i]),
+                preprocessPerImageMs,
+                inferWatch.Elapsed.TotalMilliseconds,
+                0d,
+                true,
+                recRes.Score,
+                recRes.Text.Length));
         }
     }
 
@@ -475,6 +520,32 @@ public sealed class RecOnnxRunner
         }
 
         return algorithm.GetDefaultImageShape();
+    }
+
+    private static void WriteRecProfile(
+        string outputDir,
+        int imageCount,
+        IReadOnlyList<RecTraceItem> traces,
+        int fallbackCount,
+        double totalMs)
+    {
+        var profile = new
+        {
+            image_count = imageCount,
+            traced_count = traces.Count,
+            fallback_single_count = fallbackCount,
+            total_ms = totalMs,
+            avg_preprocess_ms = traces.Count == 0 ? 0d : traces.Average(x => x.PreprocessMs),
+            avg_inference_ms = traces.Count == 0 ? 0d : traces.Average(x => x.InferenceMs),
+            avg_score = traces.Count == 0 ? 0d : traces.Average(x => x.Score)
+        };
+
+        File.WriteAllText(
+            Path.Combine(outputDir, "rec_runtime_profile.json"),
+            JsonSerializer.Serialize(profile, new JsonSerializerOptions { WriteIndented = true }));
+        File.WriteAllLines(
+            Path.Combine(outputDir, "rec_trace.jsonl"),
+            traces.Select(x => JsonSerializer.Serialize(x)));
     }
 }
 
@@ -811,6 +882,14 @@ public static class TableResultSerializer
 
 public sealed record TensorOutput(float[] Data, int[] Dims);
 public sealed record SessionRunProfile(List<TensorOutput> Outputs, double PreprocessMs, double InferenceMs);
+internal sealed record RecTraceItem(
+    string ImageName,
+    double PreprocessMs,
+    double InferenceMs,
+    double PostprocessMs,
+    bool FallbackSingle,
+    float Score,
+    int TextLength);
 
 public sealed record DetOnnxOptions(
     string ImageDir,
@@ -859,7 +938,8 @@ public sealed record RecOnnxOptions(
     int RecBatchNum = 6,
     int MaxTextLength = 25,
     bool RecImageInverse = false,
-    bool ReturnWordBox = false);
+    bool ReturnWordBox = false,
+    bool RecLogDetail = false);
 
 public sealed record ClsOnnxOptions(
     string ImageDir,
