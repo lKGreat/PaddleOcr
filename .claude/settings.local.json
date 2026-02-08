@@ -5,7 +5,8 @@
       "Bash(findstr:*)",
       "Bash(dotnet build:*)",
       "Bash(grep:*)",
-      "mcp__zread__search_doc"
+      "mcp__zread__search_doc",
+      "Bash(dotnet test:*)"
     ]
   }
 }

@@ -81,13 +81,18 @@ public static class RecModelBuilder
         int maxLen = 25,
         string? gtcHeadName = null,
         int gtcOutChannels = 0,
-        int gtcInChannels = 0)
+        int gtcInChannels = 0,
+        MultiHeadCtcNeckConfig? ctcNeckConfig = null,
+        int nrtrDim = 0)
     {
         return name.ToLowerInvariant() switch
         {
             "ctc" or "ctchead" => new CTCHead(inChannels, outChannels),
             "attn" or "attention" or "attentionhead" => new AttentionHead(inChannels, outChannels, hiddenSize, maxLen),
-            "multi" or "multihead" => new MultiHead(inChannels, outChannels, gtcOutChannels, hiddenSize, maxLen, gtcHeadName, gtcInChannels <= 0 ? inChannels : gtcInChannels),
+            "multi" or "multihead" => new MultiHead(
+                inChannels, outChannels, gtcOutChannels, hiddenSize, maxLen,
+                gtcHeadName, gtcInChannels <= 0 ? inChannels : gtcInChannels,
+                ctcNeckConfig, nrtrDim),
             "sar" or "sarhead" => new SARHead(inChannels, outChannels, hiddenSize, maxLen),
             "nrtr" or "nrtrhead" => new NRTRHead(inChannels, outChannels, hiddenSize, maxLen: maxLen),
             "srn" or "srnhead" => new SRNHead(inChannels, outChannels, hiddenSize, maxLen),
@@ -123,13 +128,15 @@ public static class RecModelBuilder
         string? gtcHeadName = null,
         int gtcOutChannels = 0,
         string? transformName = null,
-        int? headHiddenSize = null)
+        int? headHiddenSize = null,
+        MultiHeadCtcNeckConfig? ctcNeckConfig = null,
+        int nrtrDim = 0)
     {
         var transform = BuildTransform(transformName, inChannels);
         var (backbone, backboneOutCh) = BuildBackbone(backboneName, inChannels);
         var (neck, neckOutCh) = BuildNeck(neckName, backboneOutCh, hiddenSize, neckEncoderType);
         var effectiveHeadHidden = headHiddenSize ?? hiddenSize;
-        var head = BuildHead(headName, neckOutCh, numClasses, effectiveHeadHidden, maxLen, gtcHeadName, gtcOutChannels, backboneOutCh);
+        var head = BuildHead(headName, neckOutCh, numClasses, effectiveHeadHidden, maxLen, gtcHeadName, gtcOutChannels, backboneOutCh, ctcNeckConfig, nrtrDim);
         return new RecModel(transform, backbone, neck, head, transformName, backboneName, neckName, headName);
     }
 

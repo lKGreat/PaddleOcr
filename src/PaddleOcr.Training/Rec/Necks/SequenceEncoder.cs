@@ -18,7 +18,19 @@ public sealed class SequenceEncoder : Module<Tensor, Tensor>, IRecNeck
     private readonly bool _onlyReshape;
     public int OutChannels { get; }
 
-    public SequenceEncoder(int inChannels, string encoderType = "rnn", int hiddenSize = 48) : base(nameof(SequenceEncoder))
+    /// <summary>
+    /// Legacy constructor for simple encoders (rnn, fc, cascadernn, reshape).
+    /// </summary>
+    public SequenceEncoder(int inChannels, string encoderType = "rnn", int hiddenSize = 48)
+        : this(inChannels, encoderType, dims: 0, depth: 1, hiddenDims: 0, hiddenSize: hiddenSize)
+    {
+    }
+
+    /// <summary>
+    /// Enhanced constructor supporting SVTR with dims/depth/hidden_dims.
+    /// </summary>
+    public SequenceEncoder(int inChannels, string encoderType = "rnn", int dims = 0, int depth = 1, int hiddenDims = 0, int hiddenSize = 48)
+        : base(nameof(SequenceEncoder))
     {
         _encoderType = encoderType.ToLowerInvariant();
         _encoderReshape = new Im2Seq(inChannels);
@@ -37,7 +49,10 @@ public sealed class SequenceEncoder : Module<Tensor, Tensor>, IRecNeck
                 _onlyReshape = false;
                 break;
             case "svtr":
-                _encoder = new EncoderWithSVTR(inChannels);
+                // Enhanced SVTR with dims/depth support
+                _encoder = dims > 0
+                    ? new EncoderWithSVTR(inChannels, dims, depth, hiddenDims)
+                    : new EncoderWithSVTR(inChannels);
                 OutChannels = ((EncoderWithSVTR)_encoder).OutChannels;
                 _onlyReshape = false;
                 break;
@@ -146,22 +161,81 @@ internal sealed class EncoderWithFC : Module<Tensor, Tensor>
 
 /// <summary>
 /// EncoderWithSVTR: lightweight token-mixing block over flattened [H*W] tokens.
-/// Input/Output are both [B, C, H, W].
+/// Supports both simple FFN mode (for backward compatibility) and advanced mode with dims/depth/hiddenDims.
+/// Input/Output are both [B, C, H, W] (unless dims is specified, then output channels = dims).
+///
+/// When dims > 0: applies channel reduction (inChannels → dims) and stacks depth blocks.
+/// When dims == 0: uses legacy simple FFN (inChannels → inChannels).
 /// </summary>
 internal sealed class EncoderWithSVTR : Module<Tensor, Tensor>
 {
-    private readonly Module<Tensor, Tensor> _block;
+    private readonly Module<Tensor, Tensor>? _block;
+    private readonly TorchSharp.Modules.ModuleList<Module<Tensor, Tensor>>? _blocks;
+    private readonly bool _isSimpleMode;
     public int OutChannels { get; }
 
+    /// <summary>
+    /// Legacy constructor for simple FFN mode (backward compatible).
+    /// </summary>
     public EncoderWithSVTR(int inChannels) : base(nameof(EncoderWithSVTR))
     {
         OutChannels = inChannels;
+        _isSimpleMode = true;
         _block = Sequential(
             LayerNorm(inChannels),
             Linear(inChannels, inChannels * 2),
             GELU(),
             Linear(inChannels * 2, inChannels));
         RegisterComponents();
+    }
+
+    /// <summary>
+    /// Enhanced constructor with channel reduction and depth.
+    /// </summary>
+    /// <param name="inChannels">Input channels from backbone/neck</param>
+    /// <param name="dims">Output dimension; if 0, behaves like legacy mode</param>
+    /// <param name="depth">Number of stacked blocks (each block: LayerNorm + FFN)</param>
+    /// <param name="hiddenDims">FFN hidden dimension (inner expansion)</param>
+    public EncoderWithSVTR(int inChannels, int dims = 0, int depth = 1, int hiddenDims = 0)
+        : base(nameof(EncoderWithSVTR))
+    {
+        if (dims <= 0)
+        {
+            // Legacy mode
+            OutChannels = inChannels;
+            _isSimpleMode = true;
+            _block = Sequential(
+                LayerNorm(inChannels),
+                Linear(inChannels, inChannels * 2),
+                GELU(),
+                Linear(inChannels * 2, inChannels));
+            RegisterComponents();
+        }
+        else
+        {
+            // Advanced mode with channel reduction
+            OutChannels = dims;
+            _isSimpleMode = false;
+            var effectiveHiddenDims = hiddenDims > 0 ? hiddenDims : dims * 2;
+
+            // Initial projection: inChannels → dims
+            _block = Linear(inChannels, dims);
+
+            // Stack depth blocks
+            _blocks = new TorchSharp.Modules.ModuleList<Module<Tensor, Tensor>>();
+            for (var i = 0; i < depth; i++)
+            {
+                var block = Sequential(
+                    LayerNorm(dims),
+                    Linear(dims, effectiveHiddenDims),
+                    GELU(),
+                    Linear(effectiveHiddenDims, dims)
+                );
+                _blocks.Add(block);
+            }
+
+            RegisterComponents();
+        }
     }
 
     public override Tensor forward(Tensor input)
@@ -177,9 +251,31 @@ internal sealed class EncoderWithSVTR : Module<Tensor, Tensor>
         var w = input.shape[3];
 
         var x = input.flatten(2).transpose(1, 2); // [B, H*W, C]
-        var y = _block.call(x);
-        y = y + x;
-        return y.transpose(1, 2).reshape(b, c, h, w);
+
+        if (_isSimpleMode)
+        {
+            // Legacy: simple FFN with residual
+            var y = _block!.call(x);
+            y = y + x;
+            return y.transpose(1, 2).reshape(b, c, h, w);
+        }
+        else
+        {
+            // Advanced: initial projection + stacked blocks
+            var y = _block!.call(x); // [B, H*W, dims]
+
+            if (_blocks != null)
+            {
+                foreach (var block in _blocks)
+                {
+                    var blockOut = block.call(y);
+                    y = y + blockOut; // Residual connection
+                }
+            }
+
+            // Return [B, dims, H, W]
+            return y.transpose(1, 2).reshape(b, OutChannels, h, w);
+        }
     }
 }
 

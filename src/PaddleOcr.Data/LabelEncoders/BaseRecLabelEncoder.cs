@@ -22,9 +22,22 @@ public abstract class BaseRecLabelEncoder : IRecLabelEncoder
         var dictChars = new List<string>();
         if (!string.IsNullOrWhiteSpace(characterDictPath) && File.Exists(characterDictPath))
         {
+            var isFirstLine = true;
             foreach (var line in File.ReadLines(characterDictPath, Encoding.UTF8))
             {
                 var token = line.TrimEnd('\r', '\n');
+
+                // Strip UTF-8 BOM if present on first line
+                if (isFirstLine && token.Length > 0 && token[0] == '\ufeff')
+                {
+                    token = token[1..];
+                    isFirstLine = false;
+                }
+                else if (isFirstLine)
+                {
+                    isFirstLine = false;
+                }
+
                 if (token.Length > 0)
                 {
                     dictChars.Add(token);

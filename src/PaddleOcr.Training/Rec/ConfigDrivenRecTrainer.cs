@@ -7,6 +7,7 @@ using PaddleOcr.Data.LabelEncoders;
 using PaddleOcr.Training.Runtime;
 using PaddleOcr.Training.Rec.Losses;
 using PaddleOcr.Training.Rec.Schedulers;
+using PaddleOcr.Training.Rec.Heads;
 using TorchSharp;
 using static TorchSharp.torch;
 using static TorchSharp.torch.optim;
@@ -98,6 +99,11 @@ internal sealed class ConfigDrivenRecTrainer
                 cfg.StrictTeacherStudent);
         }
 
+        // Log vocab info for diagnostics
+        _logger.LogInformation("CTC vocab: size={VocabSize}, first_5=[{Vocab}]",
+            ctcEncoder.NumClasses,
+            string.Join(",", ctcEncoder.Characters.Take(5)));
+
         var ckptManager = new CheckpointManager(_logger);
         var ampHelper = runtime.UseAmp ? new AmpTrainingHelper(dev, enabled: true) : null;
         var modelAverager = new ModelAverager();
@@ -117,6 +123,7 @@ internal sealed class ConfigDrivenRecTrainer
         var recentLoss = new Queue<float>(cfg.LogSmoothWindow);
         var stepWatch = Stopwatch.StartNew();
         var distillMismatchWarned = false;
+        var diagnosticsLogged = false;
 
         if (cfg.ResumeTraining)
         {
@@ -244,6 +251,14 @@ internal sealed class ConfigDrivenRecTrainer
                 }
 
                 var lossVal = effectiveLoss.ToSingle();
+
+                // Log diagnostics for first batch
+                if (!diagnosticsLogged && globalStep == 0)
+                {
+                    diagnosticsLogged = true;
+                    LogTrainingDiagnostics(ctcLogits, yCtc, batchData, cfg, ctcEncoder);
+                }
+
                 if (float.IsNaN(lossVal) || float.IsInfinity(lossVal))
                 {
                     var nanReason =
@@ -557,8 +572,26 @@ internal sealed class ConfigDrivenRecTrainer
         var inChannels = cfg.GetArchitectureInt("in_channels", 3);
         var gtcOutChannels = ResolveGtcOutChannels(numClasses, gtcHeadName, gtcEncodeType);
 
+        // For MultiHead: extract CTC neck config and NRTR dim
+        MultiHeadCtcNeckConfig? ctcNeckConfig = null;
+        var nrtrDim = 0;
+        if (string.Equals(headName, "MultiHead", StringComparison.OrdinalIgnoreCase))
+        {
+            var extracted = ExtractMultiHeadConfig(cfg);
+            ctcNeckConfig = extracted.CtcNeckConfig;
+            nrtrDim = extracted.NrtrDim;
+
+            // When MultiHead has internal CTC encoder, model-level neck should be "reshape"
+            if (ctcNeckConfig is not null)
+            {
+                neckEncoderType = "reshape";
+            }
+        }
+
         _logger.LogInformation(
-                "Building model: transform={Transform}, backbone={Backbone}, neck={Neck}({NeckEncoder}, hidden={NeckHidden}), head={Head}(hidden={HeadHidden}), num_classes={Classes}, gtc_head={GtcHead}, gtc_classes={GtcClasses}",
+                "Building model: transform={Transform}, backbone={Backbone}, neck={Neck}({NeckEncoder}, hidden={NeckHidden}), head={Head}(hidden={HeadHidden}), num_classes={Classes}, gtc_head={GtcHead}, gtc_classes={GtcClasses}" +
+                (ctcNeckConfig is not null ? ", ctc_encoder={CtcEnc}(dims={Dims},depth={Depth})" : "") +
+                (nrtrDim > 0 ? ", nrtr_dim={NrtrDim}" : ""),
                 transformName ?? "none",
                 resolvedBackboneName,
                 neckName,
@@ -568,7 +601,11 @@ internal sealed class ConfigDrivenRecTrainer
                 headHiddenSize,
                 numClasses,
                 gtcHeadName ?? "none",
-                gtcOutChannels);
+                gtcOutChannels,
+                ctcNeckConfig?.EncoderType ?? "none",
+                ctcNeckConfig?.Dims ?? 0,
+                ctcNeckConfig?.Depth ?? 0,
+                nrtrDim);
 
         if (cfg.GetByPathPublic("Architecture.Backbone.name") is null)
         {
@@ -597,7 +634,9 @@ internal sealed class ConfigDrivenRecTrainer
             gtcHeadName,
             gtcOutChannels,
             transformName,
-            headHiddenSize);
+            headHiddenSize,
+            ctcNeckConfig,
+            nrtrDim);
     }
 
     private Optimizer BuildOptimizer(TrainingConfigView cfg, RecModel model)
@@ -823,22 +862,20 @@ internal sealed class ConfigDrivenRecTrainer
         long prev = 0;
         foreach (var id in ids)
         {
-            if (id <= 0)
+            // Skip blank (id == 0) or invalid IDs
+            if (id <= 0 || id >= vocab.Count)
             {
                 prev = 0;
                 continue;
             }
 
+            // Skip consecutive duplicates (CTC deduplication rule)
             if (id == prev)
             {
                 continue;
             }
 
-            if (id < vocab.Count)
-            {
-                sb.Append(vocab[(int)id]);
-            }
-
+            sb.Append(vocab[(int)id]);
             prev = id;
         }
 
@@ -855,6 +892,7 @@ internal sealed class ConfigDrivenRecTrainer
         var sb = new StringBuilder(ids.Length);
         foreach (var id in ids)
         {
+            // Skip blank (id == 0) or invalid IDs (consistent with DecodeCtcPrediction)
             if (id <= 0 || id >= vocab.Count)
             {
                 continue;
@@ -1329,6 +1367,61 @@ internal sealed class ConfigDrivenRecTrainer
         return string.IsNullOrWhiteSpace(fromHead) ? "reshape" : fromHead;
     }
 
+    private static (MultiHeadCtcNeckConfig? CtcNeckConfig, int NrtrDim) ExtractMultiHeadConfig(TrainingConfigView cfg)
+    {
+        MultiHeadCtcNeckConfig? ctcNeckConfig = null;
+        var nrtrDim = 0;
+
+        var raw = cfg.GetByPathPublic("Architecture.Head.head_list");
+        if (raw is not IList<object?> list)
+        {
+            return (null, 0);
+        }
+
+        // Extract CTC neck config from head_list[0].CTCHead.Neck
+        if (list.Count > 0 && list[0] is Dictionary<string, object?> firstHead &&
+            firstHead.TryGetValue("CTCHead", out var ctcCfgRaw) &&
+            ctcCfgRaw is Dictionary<string, object?> ctcCfg &&
+            ctcCfg.TryGetValue("Neck", out var neckCfgRaw) &&
+            neckCfgRaw is Dictionary<string, object?> neckCfg)
+        {
+            var encoderType = neckCfg.TryGetValue("name", out var nameObj) ? nameObj?.ToString() ?? "reshape" : "reshape";
+            var dims = neckCfg.TryGetValue("dims", out var dimsObj) ? ToInt(dimsObj) : 0;
+            var depth = neckCfg.TryGetValue("depth", out var depthObj) ? ToInt(depthObj) : 1;
+            var hiddenDims = neckCfg.TryGetValue("hidden_dims", out var hiddenObj) ? ToInt(hiddenObj) : 0;
+
+            if (dims > 0 && !string.Equals(encoderType, "reshape", StringComparison.OrdinalIgnoreCase))
+            {
+                ctcNeckConfig = new MultiHeadCtcNeckConfig(encoderType, dims, depth, hiddenDims);
+            }
+        }
+
+        // Extract nrtr_dim from head_list[1].NRTRHead.nrtr_dim
+        if (list.Count > 1 && list[1] is Dictionary<string, object?> secondHead &&
+            secondHead.TryGetValue("NRTRHead", out var nrtrCfgRaw) &&
+            nrtrCfgRaw is Dictionary<string, object?> nrtrCfg &&
+            nrtrCfg.TryGetValue("nrtr_dim", out var dimObj))
+        {
+            nrtrDim = ToInt(dimObj);
+        }
+
+        return (ctcNeckConfig, nrtrDim);
+    }
+
+    private static int ToInt(object? obj)
+    {
+        if (obj is null) return 0;
+        return obj switch
+        {
+            int i => i,
+            long l => (int)l,
+            float f => (int)f,
+            double d => (int)d,
+            decimal m => (int)m,
+            _ => int.TryParse(obj.ToString(), out var parsed) ? parsed : 0
+        };
+    }
+
     private static string InferBackboneName(string algorithm)
     {
         return algorithm.Trim().ToLowerInvariant() switch
@@ -1714,6 +1807,54 @@ internal sealed class ConfigDrivenRecTrainer
         foreach (var tensor in tensors.Values)
         {
             tensor.Dispose();
+        }
+    }
+
+    private void LogTrainingDiagnostics(
+        Tensor ctcLogits,
+        Tensor yCtc,
+        ConfigRecBatch batchData,
+        TrainingConfigView cfg,
+        CTCLabelEncode ctcEncoder)
+    {
+        try
+        {
+            // Log model output shape
+            var logitsShape = ctcLogits.shape;
+            _logger.LogInformation(
+                "Diagnostics: model_output_shape=[B={Batch},T={Time},C={Classes}]",
+                logitsShape[0], logitsShape.Length > 1 ? logitsShape[1] : 0, logitsShape.Length > 2 ? logitsShape[2] : 0);
+
+            // Log blank ratio
+            using var pred = ctcLogits.argmax(2);
+            using var blankMask = pred.eq(0);
+            var blankRatio = blankMask.to_type(ScalarType.Float32).mean().ToSingle();
+            _logger.LogInformation("Diagnostics: blank_ratio={BlankRatio:F4}", blankRatio);
+
+            // Decode and log first few predictions vs labels
+            using var predCpu = pred.cpu();
+            using var gtCpu = yCtc.cpu();
+            var predFlat = predCpu.data<long>().ToArray();
+            var gtFlat = gtCpu.data<long>().ToArray();
+            var timeSteps = (int)pred.shape[1];
+            var maxTextLength = cfg.MaxTextLength;
+
+            var vocab = ctcEncoder.Characters;
+            var sampleCount = Math.Min(3, batchData.Batch);
+            for (var i = 0; i < sampleCount; i++)
+            {
+                var predSeq = predFlat.Skip(i * timeSteps).Take(timeSteps).ToArray();
+                var gtSeq = gtFlat.Skip(i * maxTextLength).Take(maxTextLength).ToArray();
+                var predText = DecodeCtcPrediction(predSeq, vocab);
+                var gtText = DecodeLabel(gtSeq, vocab);
+                _logger.LogInformation(
+                    "Diagnostics: sample[{Idx}] pred=\"{Pred}\" label=\"{Label}\"",
+                    i, predText.Length == 0 ? "(empty)" : predText, gtText.Length == 0 ? "(empty)" : gtText);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error logging training diagnostics");
         }
     }
 }
