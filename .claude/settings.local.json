@@ -6,7 +6,20 @@
       "Bash(dotnet build:*)",
       "Bash(grep:*)",
       "mcp__zread__search_doc",
-      "Bash(dotnet test:*)"
+      "Bash(dotnet test:*)",
+      "Bash(dotnet run:*)",
+      "Bash(dotnet script:*)",
+      "Bash(python3:*)",
+      "Bash(pwsh:*)",
+      "Bash(printf:*)",
+      "Bash([ -d train_data/rec_icdar2015 ])",
+      "Bash(tee:*)",
+      "WebSearch",
+      "mcp__web-search-prime__webSearchPrime",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:api.github.com)",
+      "mcp__web-reader__webReader"
     ]
   }
 }

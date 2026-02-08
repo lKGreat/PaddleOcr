@@ -1,0 +1,41 @@
+02:03:28 info: pocr[0] Running train with config: assets/configs/rec/PP-OCRv5/PP-OCRv5_mobile_rec.yml
+02:03:28 info: pocr[0] Override count: 9
+02:03:29 info: pocr[0] Training runtime: requested=cuda, device=CUDA, cuda=True, amp=True, reason=cuda default device
+02:03:29 info: pocr[0] rec charset audit: parsed_samples=6077/6077, total_chars=32392, unknown_chars=0, unknown_ratio=0.0000
+02:03:29 info: pocr[0] Training(rec) device: CUDA
+02:03:29 info: pocr[0] runtime: requested=cuda, cuda=True, amp=True, reason=cuda default device
+02:03:29 info: pocr[0] Train samples: 4000, Eval samples: 2077, Vocab: 18385
+02:03:29 info: pocr[0] ✓ CTC Neck config created
+02:03:29 info: pocr[0] MultiHead detected with internal CTC encoder, forcing model-level neck to 'reshape'
+02:03:29 info: pocr[0] Building model: transform=none, backbone=PPLCNetV3, neck=SequenceEncoder(reshape, hidden=120), head=MultiHead(hidden=384), num_classes=18385, gtc_head=NRTRHead, gtc_classes=18388, ctc_encoder=svtr(dims=120,depth=2), nrtr_dim=384
+02:03:30 info: pocr[0] lr scheduler: name=Cosine, initial_lr=0.000500, steps_per_epoch=32, max_steps=2400, warmup_steps=160
+02:03:30 info: pocr[0] CTC input length mode: full
+02:03:30 info: pocr[0] CTC vocab: size=18385, first_5=[blank,　,一,乙,二]
+02:03:30 warn: pocr[0] Model checkpoint not found: E:\codeding\PaddleOcr\output\rec_ppocrv5_mobile_icdar2015\latest.pt
+02:03:34 info: pocr[0] Diagnostics: model_output_shape=[B=128,T=40,C=18385]
+02:03:34 info: pocr[0] Diagnostics: blank_ratio=0.0000
+02:03:34 info: pocr[0] Diagnostics: sample[0] pred="蛾悊媿泇☿詛泇史垴燘媿" label="South- #01toss"
+02:03:34 info: pocr[0] Diagnostics: sample[1] pred="𩾃⇚鰤褼ｻ淔-垴燘媿" label="AEROPOSTALE"
+02:03:34 info: pocr[0] Diagnostics: sample[2] pred="赞泇⇜☺泇媿彎垴燘媿" label="Live"
+02:04:11 info: pocr[0] train step epoch=1 step=10 loss=20.5004 base_loss=20.5004 kd_loss=n/a smooth_loss=41.2920 lr=0.000500 ctc_time=40 tgt_len_mean=9.30 step_ms=41187.2 ctc_blank_ratio=1.0000
+02:04:49 info: pocr[0] train step epoch=1 step=20 loss=13.4815 base_loss=13.4815 kd_loss=n/a smooth_loss=27.3631 lr=0.000500 ctc_time=40 tgt_len_mean=9.71 step_ms=37935.8 ctc_blank_ratio=1.0000
+02:05:27 info: pocr[0] train step epoch=1 step=30 loss=9.0296 base_loss=9.0296 kd_loss=n/a smooth_loss=12.1338 lr=0.000500 ctc_time=40 tgt_len_mean=9.36 step_ms=37726.3 ctc_blank_ratio=1.0000
+02:05:48 info: pocr[0] epoch=1/75 train_loss=21.3321 eval_acc=0.0000 eval_char_acc=0.0000 eval_edit=5.3481 lr=0.000500
+02:06:15 info: pocr[0] train step epoch=2 step=40 loss=6.2864 base_loss=6.2864 kd_loss=n/a smooth_loss=9.1717 lr=0.000500 ctc_time=40 tgt_len_mean=9.86 step_ms=48646.0 ctc_blank_ratio=1.0000
+02:06:50 info: pocr[0] train step epoch=2 step=50 loss=4.9240 base_loss=4.9240 kd_loss=n/a smooth_loss=6.4587 lr=0.000499 ctc_time=40 tgt_len_mean=9.57 step_ms=34300.4 ctc_blank_ratio=1.0000
+02:07:23 info: pocr[0] train step epoch=2 step=60 loss=4.5592 base_loss=4.5592 kd_loss=n/a smooth_loss=5.0301 lr=0.000499 ctc_time=40 tgt_len_mean=9.85 step_ms=33437.1 ctc_blank_ratio=1.0000
+02:07:41 info: pocr[0] epoch=2/75 train_loss=5.5234 eval_acc=0.0000 eval_char_acc=0.0000 eval_edit=5.3481 lr=0.000499
+02:07:59 info: pocr[0] train step epoch=3 step=70 loss=4.3716 base_loss=4.3716 kd_loss=n/a smooth_loss=4.5347 lr=0.000499 ctc_time=40 tgt_len_mean=9.29 step_ms=35570.7 ctc_blank_ratio=1.0000
+02:08:31 info: pocr[0] train step epoch=3 step=80 loss=4.3206 base_loss=4.3206 kd_loss=n/a smooth_loss=4.3522 lr=0.000499 ctc_time=40 tgt_len_mean=10.30 step_ms=32499.9 ctc_blank_ratio=1.0000
+02:09:06 info: pocr[0] train step epoch=3 step=90 loss=4.1808 base_loss=4.1808 kd_loss=n/a smooth_loss=4.2647 lr=0.000498 ctc_time=40 tgt_len_mean=9.52 step_ms=34480.2 ctc_blank_ratio=1.0000
+02:09:28 info: pocr[0] epoch=3/75 train_loss=4.2707 eval_acc=0.0000 eval_char_acc=0.0000 eval_edit=5.3481 lr=0.000498
+02:09:40 info: pocr[0] train step epoch=4 step=100 loss=4.1963 base_loss=4.1963 kd_loss=n/a smooth_loss=4.2196 lr=0.000498 ctc_time=40 tgt_len_mean=9.33 step_ms=34625.5 ctc_blank_ratio=1.0000
+02:10:13 info: pocr[0] train step epoch=4 step=110 loss=4.1568 base_loss=4.1568 kd_loss=n/a smooth_loss=4.2036 lr=0.000497 ctc_time=40 tgt_len_mean=10.48 step_ms=32496.8 ctc_blank_ratio=1.0000
+02:10:47 info: pocr[0] train step epoch=4 step=120 loss=4.1242 base_loss=4.1242 kd_loss=n/a smooth_loss=4.2026 lr=0.000497 ctc_time=40 tgt_len_mean=9.55 step_ms=33934.8 ctc_blank_ratio=1.0000
+02:11:16 info: pocr[0] epoch=4/75 train_loss=4.2029 eval_acc=0.0000 eval_char_acc=0.0000 eval_edit=5.3481 lr=0.000497
+02:11:22 info: pocr[0] train step epoch=5 step=130 loss=4.1383 base_loss=4.1383 kd_loss=n/a smooth_loss=4.1840 lr=0.000496 ctc_time=40 tgt_len_mean=10.88 step_ms=35159.5 ctc_blank_ratio=1.0000
+02:11:52 info: pocr[0] train step epoch=5 step=140 loss=4.1616 base_loss=4.1616 kd_loss=n/a smooth_loss=4.1738 lr=0.000496 ctc_time=40 tgt_len_mean=10.36 step_ms=30475.6 ctc_blank_ratio=1.0000
+02:12:26 info: pocr[0] train step epoch=5 step=150 loss=4.2156 base_loss=4.2156 kd_loss=n/a smooth_loss=4.1730 lr=0.000495 ctc_time=40 tgt_len_mean=9.61 step_ms=33403.4 ctc_blank_ratio=1.0000
+02:12:56 info: pocr[0] train step epoch=5 step=160 loss=4.1807 base_loss=4.1807 kd_loss=n/a smooth_loss=4.1627 lr=0.000495 ctc_time=40 tgt_len_mean=11.03 step_ms=29789.8 ctc_blank_ratio=1.0000
+02:13:01 info: pocr[0] epoch=5/75 train_loss=4.1650 eval_acc=0.0000 eval_char_acc=0.0000 eval_edit=5.3481 lr=0.000495
+02:13:30 info: pocr[0] train step epoch=6 step=170 loss=4.1766 base_loss=4.1766 kd_loss=n/a smooth_loss=4.1545 lr=0.000494 ctc_time=40 tgt_len_mean=10.64 step_ms=34632.5 ctc_blank_ratio=1.0000

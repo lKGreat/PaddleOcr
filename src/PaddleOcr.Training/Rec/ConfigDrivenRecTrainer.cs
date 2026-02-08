@@ -577,14 +577,13 @@ internal sealed class ConfigDrivenRecTrainer
         var nrtrDim = 0;
         if (string.Equals(headName, "MultiHead", StringComparison.OrdinalIgnoreCase))
         {
-            var extracted = ExtractMultiHeadConfig(cfg);
-            ctcNeckConfig = extracted.CtcNeckConfig;
-            nrtrDim = extracted.NrtrDim;
+            ExtractMultiHeadConfig(cfg, out ctcNeckConfig, out nrtrDim);
 
             // When MultiHead has internal CTC encoder, model-level neck should be "reshape"
             if (ctcNeckConfig is not null)
             {
                 neckEncoderType = "reshape";
+                _logger.LogInformation("MultiHead detected with internal CTC encoder, forcing model-level neck to 'reshape'");
             }
         }
 
@@ -1367,45 +1366,91 @@ internal sealed class ConfigDrivenRecTrainer
         return string.IsNullOrWhiteSpace(fromHead) ? "reshape" : fromHead;
     }
 
-    private static (MultiHeadCtcNeckConfig? CtcNeckConfig, int NrtrDim) ExtractMultiHeadConfig(TrainingConfigView cfg)
+    private void ExtractMultiHeadConfig(TrainingConfigView cfg, out MultiHeadCtcNeckConfig? ctcNeckConfig, out int nrtrDim)
     {
-        MultiHeadCtcNeckConfig? ctcNeckConfig = null;
-        var nrtrDim = 0;
+        ctcNeckConfig = null;
+        nrtrDim = 0;
 
         var raw = cfg.GetByPathPublic("Architecture.Head.head_list");
         if (raw is not IList<object?> list)
         {
-            return (null, 0);
+            _logger.LogWarning("head_list not found or not a list");
+            return;
         }
 
-        // Extract CTC neck config from head_list[0].CTCHead.Neck
-        if (list.Count > 0 && list[0] is Dictionary<string, object?> firstHead &&
-            firstHead.TryGetValue("CTCHead", out var ctcCfgRaw) &&
-            ctcCfgRaw is Dictionary<string, object?> ctcCfg &&
-            ctcCfg.TryGetValue("Neck", out var neckCfgRaw) &&
-            neckCfgRaw is Dictionary<string, object?> neckCfg)
-        {
-            var encoderType = neckCfg.TryGetValue("name", out var nameObj) ? nameObj?.ToString() ?? "reshape" : "reshape";
-            var dims = neckCfg.TryGetValue("dims", out var dimsObj) ? ToInt(dimsObj) : 0;
-            var depth = neckCfg.TryGetValue("depth", out var depthObj) ? ToInt(depthObj) : 1;
-            var hiddenDims = neckCfg.TryGetValue("hidden_dims", out var hiddenObj) ? ToInt(hiddenObj) : 0;
+        _logger.LogDebug("head_list count: {Count}", list.Count);
 
-            if (dims > 0 && !string.Equals(encoderType, "reshape", StringComparison.OrdinalIgnoreCase))
+        // Extract CTC neck config from head_list[0].CTCHead.Neck
+        if (list.Count > 0)
+        {
+            _logger.LogDebug("head_list[0] type: {Type}", list[0]?.GetType().Name);
+
+            if (list[0] is Dictionary<string, object?> firstHead)
             {
-                ctcNeckConfig = new MultiHeadCtcNeckConfig(encoderType, dims, depth, hiddenDims);
+                _logger.LogDebug("head_list[0] keys: {Keys}", string.Join(",", firstHead.Keys));
+
+                if (firstHead.TryGetValue("CTCHead", out var ctcCfgRaw))
+                {
+                    _logger.LogDebug("CTCHead config type: {Type}", ctcCfgRaw?.GetType().Name);
+
+                    if (ctcCfgRaw is Dictionary<string, object?> ctcCfg)
+                    {
+                        _logger.LogDebug("CTCHead keys: {Keys}", string.Join(",", ctcCfg.Keys));
+
+                        if (ctcCfg.TryGetValue("Neck", out var neckCfgRaw))
+                        {
+                            _logger.LogDebug("Neck config type: {Type}", neckCfgRaw?.GetType().Name);
+
+                            if (neckCfgRaw is Dictionary<string, object?> neckCfg)
+                            {
+                                _logger.LogDebug("Neck keys: {Keys}", string.Join(",", neckCfg.Keys));
+
+                                var encoderType = neckCfg.TryGetValue("name", out var nameObj) ? nameObj?.ToString() ?? "reshape" : "reshape";
+                                var dims = neckCfg.TryGetValue("dims", out var dimsObj) ? ToInt(dimsObj) : 0;
+                                var depth = neckCfg.TryGetValue("depth", out var depthObj) ? ToInt(depthObj) : 1;
+                                var hiddenDims = neckCfg.TryGetValue("hidden_dims", out var hiddenObj) ? ToInt(hiddenObj) : 0;
+
+                                _logger.LogDebug("CTC Neck: encoderType={Type}, dims={Dims}, depth={Depth}, hiddenDims={Hidden}",
+                                    encoderType, dims, depth, hiddenDims);
+
+                                if (dims > 0 && !string.Equals(encoderType, "reshape", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    ctcNeckConfig = new MultiHeadCtcNeckConfig(encoderType, dims, depth, hiddenDims);
+                                    _logger.LogInformation("✓ CTC Neck config created");
+                                }
+                                else
+                                {
+                                    _logger.LogDebug("CTC Neck config skipped: dims={Dims} (need >0), encoder={Type} (need non-reshape)", dims, encoderType);
+                                }
+                            }
+                        }
+                        else
+                        {
+                            _logger.LogDebug("Neck not found in CTCHead config");
+                        }
+                    }
+                }
+                else
+                {
+                    _logger.LogDebug("CTCHead not found in head_list[0]");
+                }
             }
         }
 
         // Extract nrtr_dim from head_list[1].NRTRHead.nrtr_dim
-        if (list.Count > 1 && list[1] is Dictionary<string, object?> secondHead &&
-            secondHead.TryGetValue("NRTRHead", out var nrtrCfgRaw) &&
-            nrtrCfgRaw is Dictionary<string, object?> nrtrCfg &&
-            nrtrCfg.TryGetValue("nrtr_dim", out var dimObj))
+        if (list.Count > 1)
         {
-            nrtrDim = ToInt(dimObj);
-        }
+            _logger.LogDebug("head_list[1] type: {Type}", list[1]?.GetType().Name);
 
-        return (ctcNeckConfig, nrtrDim);
+            if (list[1] is Dictionary<string, object?> secondHead &&
+                secondHead.TryGetValue("NRTRHead", out var nrtrCfgRaw) &&
+                nrtrCfgRaw is Dictionary<string, object?> nrtrCfg &&
+                nrtrCfg.TryGetValue("nrtr_dim", out var dimObj))
+            {
+                nrtrDim = ToInt(dimObj);
+                _logger.LogDebug("NRTR dim extracted: {NrtrDim}", nrtrDim);
+            }
+        }
     }
 
     private static int ToInt(object? obj)
