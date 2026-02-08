@@ -96,6 +96,75 @@ public sealed class TrainingConfigViewTests
         GetFloat(cfg, "CharsetMaxUnknownRatio").Should().BeApproximately(0.2f, 1e-6f);
     }
 
+    [Fact]
+    public void TrainLoader_And_Sampler_Should_Parse_Official_Fields()
+    {
+        var cfg = CreateConfig(new Dictionary<string, object?>
+        {
+            ["Train"] = new Dictionary<string, object?>
+            {
+                ["dataset"] = new Dictionary<string, object?>
+                {
+                    ["name"] = "MultiScaleDataSet",
+                    ["ds_width"] = true,
+                    ["ext_op_transform_idx"] = 1,
+                    ["transforms"] = new List<object?>
+                    {
+                        new Dictionary<string, object?>
+                        {
+                            ["RecConAug"] = new Dictionary<string, object?>
+                            {
+                                ["image_shape"] = new List<object?> { 32, 224, 3 }
+                            }
+                        }
+                    }
+                },
+                ["loader"] = new Dictionary<string, object?>
+                {
+                    ["shuffle"] = false,
+                    ["drop_last"] = true,
+                    ["num_workers"] = 6
+                },
+                ["sampler"] = new Dictionary<string, object?>
+                {
+                    ["name"] = "MultiScaleSampler",
+                    ["scales"] = new List<object?>
+                    {
+                        new List<object?> { 320, 32 },
+                        new List<object?> { 640, 48 }
+                    },
+                    ["first_bs"] = 192,
+                    ["fix_bs"] = false,
+                    ["divided_factor"] = new List<object?> { 8, 16 }
+                }
+            },
+            ["Eval"] = new Dictionary<string, object?>
+            {
+                ["loader"] = new Dictionary<string, object?>
+                {
+                    ["shuffle"] = true,
+                    ["drop_last"] = true,
+                    ["num_workers"] = 2
+                }
+            }
+        });
+
+        GetBool(cfg, "TrainShuffle").Should().BeFalse();
+        GetBool(cfg, "TrainDropLast").Should().BeTrue();
+        GetInt(cfg, "TrainNumWorkers").Should().Be(6);
+        GetBool(cfg, "EvalShuffle").Should().BeTrue();
+        GetBool(cfg, "EvalDropLast").Should().BeTrue();
+        GetInt(cfg, "EvalNumWorkers").Should().Be(2);
+        GetBool(cfg, "TrainDsWidth").Should().BeTrue();
+        GetInt(cfg, "TrainExtOpTransformIdx").Should().Be(1);
+        GetBool(cfg, "UseTrainMultiScaleSampler").Should().BeTrue();
+        GetString(cfg, "TrainSamplerName").Should().Be("MultiScaleSampler");
+        GetInt(cfg, "TrainSamplerFirstBatchSize").Should().Be(192);
+        GetBool(cfg, "TrainSamplerFixBatchSize").Should().BeFalse();
+        GetIntArray(cfg, "TrainSamplerDividedFactor").Should().Equal(8, 16);
+        GetValueTuple3Int(cfg, "RecImageShape").Should().Be((3, 32, 224));
+    }
+
     private static object CreateConfig(Dictionary<string, object?> overrides)
     {
         var root = new Dictionary<string, object?>(StringComparer.Ordinal)
@@ -184,5 +253,15 @@ public sealed class TrainingConfigViewTests
     private static float GetFloat(object cfg, string propertyName)
     {
         return (float)(cfg.GetType().GetProperty(propertyName)!.GetValue(cfg) ?? 0f);
+    }
+
+    private static (int C, int H, int W) GetValueTuple3Int(object cfg, string propertyName)
+    {
+        var value = cfg.GetType().GetProperty(propertyName)!.GetValue(cfg);
+        return value switch
+        {
+            ValueTuple<int, int, int> tuple => tuple,
+            _ => (0, 0, 0)
+        };
     }
 }

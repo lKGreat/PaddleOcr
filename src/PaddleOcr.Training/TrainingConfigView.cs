@@ -78,6 +78,25 @@ internal sealed class TrainingConfigView
     public string? RecCharDictPath => ResolvePathOrNull(GetStringOrNull("Global.character_dict_path"));
     public int MaxTextLength => GetInt("Global.max_text_length", 25);
     public bool UseSpaceChar => GetBool("Global.use_space_char", true);
+    public bool TrainShuffle => GetBool("Train.loader.shuffle", true);
+    public bool EvalShuffle => GetBool("Eval.loader.shuffle", false);
+    public bool TrainDropLast => GetBool("Train.loader.drop_last", false);
+    public bool EvalDropLast => GetBool("Eval.loader.drop_last", false);
+    public int TrainNumWorkers => Math.Max(0, GetInt("Train.loader.num_workers", 0));
+    public int EvalNumWorkers => Math.Max(0, GetInt("Eval.loader.num_workers", 0));
+    public bool TrainDsWidth => GetBool("Train.dataset.ds_width", false);
+    public int TrainExtOpTransformIdx => Math.Max(1, GetInt("Train.dataset.ext_op_transform_idx", 2));
+    public string TrainSamplerName => GetString("Train.sampler.name", string.Empty);
+    public bool UseTrainMultiScaleSampler =>
+        TrainSamplerName.Equals("MultiScaleSampler", StringComparison.OrdinalIgnoreCase) &&
+        TrainSamplerScales.Length > 0;
+    public (int Width, int Height)[] TrainSamplerScales => GetSamplerScales();
+    public int TrainSamplerFirstBatchSize => Math.Max(1, GetInt("Train.sampler.first_bs", BatchSize));
+    public bool TrainSamplerFixBatchSize => GetBool("Train.sampler.fix_bs", true);
+    public int[] TrainSamplerDividedFactor => ParseIntList("Train.sampler.divided_factor", [8, 16]);
+    public bool TrainSamplerIsTraining => GetBool("Train.sampler.is_training", true);
+    public float TrainSamplerRatioWh => Clamp(GetFloat("Train.sampler.ratio_wh", 0.8f), 0f, 100f);
+    public float TrainSamplerMaxW => Math.Max(1f, GetFloat("Train.sampler.max_w", 480f));
 
     private (int C, int H, int W) ParseImageShape()
     {
@@ -95,6 +114,24 @@ internal sealed class TrainingConfigView
         var shape = GetIntListFromTransforms("Train.dataset.transforms", "RecResizeImg", "image_shape");
         if (shape.Count >= 3)
         {
+            return (shape[0], shape[1], shape[2]);
+        }
+
+        shape = GetIntListFromTransforms("Train.dataset.transforms", "SVTRRecResizeImg", "image_shape");
+        if (shape.Count >= 3)
+        {
+            return (shape[0], shape[1], shape[2]);
+        }
+
+        shape = GetIntListFromTransforms("Train.dataset.transforms", "RecConAug", "image_shape");
+        if (shape.Count >= 3)
+        {
+            // RecConAug image_shape in PaddleOCR is [H, W, C].
+            if (shape[0] > 4 && shape[2] <= 4)
+            {
+                return (shape[2], shape[0], shape[1]);
+            }
+
             return (shape[0], shape[1], shape[2]);
         }
 
@@ -183,7 +220,7 @@ internal sealed class TrainingConfigView
 
     private List<int> GetIntListFromTransforms(string transformsPath, string opName, string field)
     {
-        if (GetByPath(transformsPath) is not List<object?> transforms)
+        if (GetByPath(transformsPath) is not IList<object?> transforms)
         {
             return [];
         }
@@ -200,7 +237,9 @@ internal sealed class TrainingConfigView
                 continue;
             }
 
-            if (opVal is Dictionary<string, object?> opCfg && opCfg.TryGetValue(field, out var listObj) && listObj is List<object?> list)
+            if (opVal is Dictionary<string, object?> opCfg &&
+                opCfg.TryGetValue(field, out var listObj) &&
+                listObj is IList<object?> list)
             {
                 return list
                     .Where(x => x is not null)
@@ -214,7 +253,7 @@ internal sealed class TrainingConfigView
 
     public bool HasTransform(string transformsPath, string opName)
     {
-        if (GetByPath(transformsPath) is not List<object?> transforms)
+        if (GetByPath(transformsPath) is not IList<object?> transforms)
         {
             return false;
         }
@@ -508,7 +547,12 @@ internal sealed class TrainingConfigView
     /// </summary>
     public Dictionary<string, object?>? GetTransformConfig(string opName)
     {
-        if (GetByPath("Train.dataset.transforms") is not List<object?> transforms)
+        return GetTransformConfig("Train.dataset.transforms", opName);
+    }
+
+    public Dictionary<string, object?>? GetTransformConfig(string transformsPath, string opName)
+    {
+        if (GetByPath(transformsPath) is not IList<object?> transforms)
         {
             return null;
         }
@@ -523,6 +567,11 @@ internal sealed class TrainingConfigView
             if (op.TryGetValue(opName, out var cfgObj) && cfgObj is Dictionary<string, object?> cfg)
             {
                 return cfg;
+            }
+
+            if (op.TryGetValue(opName, out cfgObj) && cfgObj is null)
+            {
+                return new Dictionary<string, object?>(StringComparer.Ordinal);
             }
         }
 
@@ -565,6 +614,25 @@ internal sealed class TrainingConfigView
         return fallback;
     }
 
+    public int[] GetTransformIntArray(string opName, string field)
+    {
+        var cfg = GetTransformConfig(opName);
+        if (cfg is null)
+        {
+            return [];
+        }
+
+        if (!cfg.TryGetValue(field, out var raw) || raw is not IList<object?> list)
+        {
+            return [];
+        }
+
+        return list
+            .Select(x => int.TryParse(x?.ToString(), out var parsed) ? parsed : 0)
+            .Where(x => x > 0)
+            .ToArray();
+    }
+
     private (int Start, int Interval) ParseEvalBatchStep()
     {
         var raw = GetByPath("Global.eval_batch_step");
@@ -599,6 +667,16 @@ internal sealed class TrainingConfigView
         return float.IsNaN(scalar) ? [1f] : [scalar];
     }
 
+    private (int Width, int Height)[] GetSamplerScales()
+    {
+        if (!TryGetSamplerScales(out var scales))
+        {
+            return [];
+        }
+
+        return scales;
+    }
+
     private bool TryGetSamplerScales(out (int Width, int Height)[] scales)
     {
         scales = [];
@@ -629,6 +707,21 @@ internal sealed class TrainingConfigView
 
         scales = parsed.ToArray();
         return scales.Length > 0;
+    }
+
+    private int[] ParseIntList(string path, int[] fallback)
+    {
+        var raw = GetByPath(path);
+        if (raw is not IList<object?> list)
+        {
+            return fallback;
+        }
+
+        var parsed = list
+            .Select(x => int.TryParse(x?.ToString(), out var v) ? v : 0)
+            .Where(v => v > 0)
+            .ToArray();
+        return parsed.Length == 0 ? fallback : parsed;
     }
 
     private static float ParseFloatOrNaN(object? raw)

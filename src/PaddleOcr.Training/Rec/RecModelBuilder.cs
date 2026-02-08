@@ -57,6 +57,11 @@ public static class RecModelBuilder
     {
         var normalizedName = name.ToLowerInvariant();
         var normalizedEncoderType = (encoderType ?? string.Empty).ToLowerInvariant();
+        if (normalizedName is "none" or "identity" || normalizedEncoderType is "none" or "identity")
+        {
+            return (new PaddleOcr.Training.Rec.Necks.Identity(), inChannels);
+        }
+
         if (normalizedName is "sequenceencoder" or "sequence_encoder" or "neck")
         {
             normalizedName = string.IsNullOrWhiteSpace(normalizedEncoderType) ? "reshape" : normalizedEncoderType;

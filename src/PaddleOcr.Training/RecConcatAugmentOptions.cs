@@ -1,11 +1,11 @@
 namespace PaddleOcr.Training;
 
 /// <summary>
-/// Options for RecConAug-style concatenation augmentation (PP-OCRv5).
+/// Options for RecConAug-style concatenation augmentation.
 /// </summary>
-internal sealed record RecConcatAugmentOptions(bool Enabled, float Prob, int ExtDataNum, float MaxWhRatio)
+internal sealed record RecConcatAugmentOptions(bool Enabled, float Prob, int ExtDataNum, float MaxWhRatio, int ImageHeight)
 {
-    public static RecConcatAugmentOptions Disabled { get; } = new(false, 0f, 0, 0f);
+    public static RecConcatAugmentOptions Disabled { get; } = new(false, 0f, 0, 0f, 0);
 
     public static RecConcatAugmentOptions FromConfig(TrainingConfigView cfg, int imageH, int imageW)
     {
@@ -22,20 +22,27 @@ internal sealed record RecConcatAugmentOptions(bool Enabled, float Prob, int Ext
             prob = 0.5f;
         }
 
-        var extDataNum = cfg.GetTransformInt("RecConAug", "ext_data_num", cfg.GetConfigInt("Train.dataset.concat_aug.ext_data_num", 2));
+        var extDataNum = cfg.GetTransformInt("RecConAug", "ext_data_num", cfg.GetConfigInt("Train.dataset.concat_aug.ext_data_num", 1));
         if (extDataNum <= 0)
         {
             extDataNum = 1;
         }
 
+        var imageShape = cfg.GetTransformIntArray("RecConAug", "image_shape");
+        if (imageShape.Length >= 2 && imageShape[0] > 0 && imageShape[1] > 0)
+        {
+            // PaddleOCR RecConAug uses image_shape=[H,W,C], max_wh_ratio = W / H.
+            imageH = imageShape[0];
+            imageW = imageShape[1];
+        }
+
         var defaultRatio = imageW <= 0 || imageH <= 0 ? 6.67f : (float)imageW / imageH;
-        var maxWhRatio = cfg.GetTransformFloat("RecConAug", "max_wh_ratio", cfg.GetConfigFloat("Train.dataset.concat_aug.max_wh_ratio", defaultRatio));
+        var maxWhRatio = defaultRatio;
         if (maxWhRatio <= 0f)
         {
             maxWhRatio = defaultRatio;
         }
 
-        return new RecConcatAugmentOptions(true, prob, extDataNum, maxWhRatio);
+        return new RecConcatAugmentOptions(true, prob, extDataNum, maxWhRatio, Math.Max(1, imageH));
     }
 }
-

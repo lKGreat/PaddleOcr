@@ -39,6 +39,7 @@ internal sealed class ConfigDrivenRecTrainer
         var gtcEncoder = CreateGtcEncoder(gtcEncodeType, cfg);
         var resizeStrategy = RecTrainingResizeFactory.Create(cfg.GetArchitectureString("algorithm", "SVTR_LCNet"));
         var concatOptions = RecConcatAugmentOptions.FromConfig(cfg, shape.H, shape.W);
+        var trainEnableRecAug = cfg.HasTransform("Train.dataset.transforms", "RecAug");
 
         var trainSet = new ConfigRecDataset(
             trainLabelFiles,
@@ -49,14 +50,15 @@ internal sealed class ConfigDrivenRecTrainer
             ctcEncoder,
             gtcEncoder,
             resizeStrategy,
-            enableAugmentation: true,
+            enableAugmentation: trainEnableRecAug,
             useMultiScale: cfg.UseMultiScale,
             multiScaleWidths: cfg.MultiScaleWidths,
             multiScaleHeights: cfg.MultiScaleHeights,
             delimiter: cfg.TrainDelimiter,
             ratioList: cfg.TrainRatioList,
             seed: cfg.Seed,
-            concatOptions: concatOptions);
+            concatOptions: concatOptions,
+            dsWidth: cfg.TrainDsWidth);
 
         var evalSet = new ConfigRecDataset(
             evalLabelFiles,
@@ -71,19 +73,49 @@ internal sealed class ConfigDrivenRecTrainer
             useMultiScale: false,
             delimiter: cfg.EvalDelimiter,
             seed: cfg.Seed + 17,
-            concatOptions: RecConcatAugmentOptions.Disabled);
+            concatOptions: RecConcatAugmentOptions.Disabled,
+            dsWidth: false);
+
+        OfficialMultiScaleSampler? trainSampler = null;
+        if (cfg.UseTrainMultiScaleSampler)
+        {
+            trainSampler = new OfficialMultiScaleSampler(
+                trainSet.Count,
+                cfg.TrainSamplerScales,
+                cfg.TrainSamplerFirstBatchSize,
+                cfg.TrainSamplerFixBatchSize,
+                cfg.TrainSamplerDividedFactor,
+                cfg.TrainSamplerIsTraining,
+                cfg.TrainDsWidth,
+                trainSet.WidthHeightRatios,
+                trainSet.WidthHeightSortIndices,
+                cfg.TrainSamplerRatioWh,
+                cfg.TrainSamplerMaxW);
+        }
 
         var runtime = TrainingDeviceResolver.Resolve(cfg);
         var dev = runtime.Device;
         _logger.LogInformation("Training(rec) device: {Device}", dev.type);
         _logger.LogInformation("runtime: requested={Requested}, cuda={Cuda}, amp={Amp}, reason={Reason}", runtime.RequestedDevice, runtime.UseCuda, runtime.UseAmp, runtime.Reason);
         _logger.LogInformation("Train samples: {TrainCount}, Eval samples: {EvalCount}, Vocab: {Vocab}", trainSet.Count, evalSet.Count, ctcEncoder.NumClasses);
+        _logger.LogInformation(
+            "loader(rec): train_shuffle={TrainShuffle}, train_drop_last={TrainDropLast}, eval_shuffle={EvalShuffle}, eval_drop_last={EvalDropLast}, train_workers={TrainWorkers}, eval_workers={EvalWorkers}, sampler={Sampler}, ext_op_transform_idx={ExtOpIdx}, rec_aug={RecAug}, rec_con_aug={RecConAug}",
+            cfg.TrainShuffle,
+            cfg.TrainDropLast,
+            cfg.EvalShuffle,
+            cfg.EvalDropLast,
+            cfg.TrainNumWorkers,
+            cfg.EvalNumWorkers,
+            cfg.UseTrainMultiScaleSampler ? cfg.TrainSamplerName : "none",
+            cfg.TrainExtOpTransformIdx,
+            trainEnableRecAug,
+            concatOptions.Enabled);
 
         var model = BuildModel(cfg, ctcEncoder.NumClasses, gtcEncodeType);
         model.to(dev);
 
         var optimizer = BuildOptimizer(cfg, model);
-        var lrScheduler = BuildLRScheduler(cfg, trainSet.Count, cfg.BatchSize);
+        var lrScheduler = BuildLRScheduler(cfg, trainSet.Count, cfg.BatchSize, trainSampler?.EstimatedStepsPerEpoch);
         var lossFn = BuildLoss(cfg, gtcEncodeType);
         _logger.LogInformation("CTC input length mode: {Mode}", cfg.CtcInputLengthMode);
 
@@ -154,7 +186,12 @@ internal sealed class ConfigDrivenRecTrainer
             var lossSum = 0f;
             var sampleCount = 0;
 
-            foreach (var batchData in trainSet.GetBatches(cfg.BatchSize, shuffle: true, rng))
+            foreach (var batchData in trainSet.GetBatches(
+                cfg.BatchSize,
+                shuffle: cfg.TrainShuffle,
+                rng: rng,
+                dropLast: cfg.TrainDropLast,
+                sampler: trainSampler))
             {
                 using var x = torch.tensor(batchData.Images, dtype: ScalarType.Float32).reshape(batchData.Batch, 3, batchData.Height, batchData.Width).to(dev);
                 using var yCtc = torch.tensor(batchData.LabelCtc, dtype: ScalarType.Int64).reshape(batchData.Batch, cfg.MaxTextLength).to(dev);
@@ -392,7 +429,15 @@ internal sealed class ConfigDrivenRecTrainer
 
                 if (cfg.CalMetricDuringTrain && ShouldEvalByStep(cfg, globalStep))
                 {
-                    var stepEval = Evaluate(model, evalSet, cfg.EvalBatchSize, cfg.MaxTextLength, dev, ctcEncoder.Characters);
+                    var stepEval = Evaluate(
+                        model,
+                        evalSet,
+                        cfg.EvalBatchSize,
+                        cfg.MaxTextLength,
+                        dev,
+                        ctcEncoder.Characters,
+                        cfg.EvalShuffle,
+                        cfg.EvalDropLast);
                     if (stepEval.Accuracy > bestAcc + cfg.MinImproveDelta)
                     {
                         bestAcc = stepEval.Accuracy;
@@ -432,7 +477,15 @@ internal sealed class ConfigDrivenRecTrainer
             }
 
             var trainLoss = sampleCount == 0 ? 0f : lossSum / sampleCount;
-            var evalMetrics = Evaluate(model, evalSet, cfg.EvalBatchSize, cfg.MaxTextLength, dev, ctcEncoder.Characters);
+            var evalMetrics = Evaluate(
+                model,
+                evalSet,
+                cfg.EvalBatchSize,
+                cfg.MaxTextLength,
+                dev,
+                ctcEncoder.Characters,
+                cfg.EvalShuffle,
+                cfg.EvalDropLast);
 
             if (evalMetrics.Accuracy > bestAcc + cfg.MinImproveDelta)
             {
@@ -519,7 +572,8 @@ internal sealed class ConfigDrivenRecTrainer
             resizeStrategy,
             enableAugmentation: false,
             delimiter: cfg.EvalDelimiter,
-            seed: cfg.Seed + 17);
+            seed: cfg.Seed + 17,
+            dsWidth: false);
 
         var runtime = TrainingDeviceResolver.Resolve(cfg);
         var dev = runtime.Device;
@@ -532,7 +586,15 @@ internal sealed class ConfigDrivenRecTrainer
             TryLoadCheckpoint(model, ckpt);
         }
 
-        var metrics = Evaluate(model, evalSet, cfg.EvalBatchSize, cfg.MaxTextLength, dev, ctcEncoder.Characters);
+        var metrics = Evaluate(
+            model,
+            evalSet,
+            cfg.EvalBatchSize,
+            cfg.MaxTextLength,
+            dev,
+            ctcEncoder.Characters,
+            cfg.EvalShuffle,
+            cfg.EvalDropLast);
         model.Dispose();
 
         var summary = new EvaluationSummary(metrics.Accuracy, evalSet.Count);
@@ -579,11 +641,12 @@ internal sealed class ConfigDrivenRecTrainer
         {
             ExtractMultiHeadConfig(cfg, out ctcNeckConfig, out nrtrDim);
 
-            // When MultiHead has internal CTC encoder, model-level neck should be "reshape"
+            // Paddle path: MultiHead internal CTC encoder consumes backbone 4D feat directly.
+            // So model-level neck must be bypassed.
             if (ctcNeckConfig is not null)
             {
-                neckEncoderType = "reshape";
-                _logger.LogInformation("MultiHead detected with internal CTC encoder, forcing model-level neck to 'reshape'");
+                neckEncoderType = "none";
+                _logger.LogInformation("MultiHead detected with internal CTC encoder, forcing model-level neck to 'none'");
             }
         }
 
@@ -659,11 +722,13 @@ internal sealed class ConfigDrivenRecTrainer
         };
     }
 
-    private ILRScheduler BuildLRScheduler(TrainingConfigView cfg, int trainSampleCount, int batchSize)
+    private ILRScheduler BuildLRScheduler(TrainingConfigView cfg, int trainSampleCount, int batchSize, int? stepsPerEpochOverride = null)
     {
         var lrConfig = cfg.GetOptimizerLrConfig();
         var lrName = lrConfig.TryGetValue("name", out var rawName) ? rawName?.ToString() ?? "Cosine" : "Cosine";
-        var stepsPerEpoch = Math.Max(1, (int)Math.Ceiling(trainSampleCount / (double)Math.Max(1, batchSize)));
+        var stepsPerEpoch = stepsPerEpochOverride is > 0
+            ? stepsPerEpochOverride.Value
+            : Math.Max(1, (int)Math.Ceiling(trainSampleCount / (double)Math.Max(1, batchSize)));
         var maxSteps = Math.Max(1, stepsPerEpoch * Math.Max(1, cfg.EpochNum));
         if (!lrConfig.ContainsKey("initial_lr"))
         {
@@ -763,7 +828,9 @@ internal sealed class ConfigDrivenRecTrainer
         int batchSize,
         int maxTextLength,
         Device dev,
-        IReadOnlyList<string> vocab)
+        IReadOnlyList<string> vocab,
+        bool shuffle,
+        bool dropLast)
     {
         model.eval();
         long correct = 0;
@@ -772,7 +839,7 @@ internal sealed class ConfigDrivenRecTrainer
         var charErrors = 0L;
         var editSum = 0L;
         using var noGrad = torch.no_grad();
-        foreach (var batchData in evalSet.GetBatches(batchSize, shuffle: false, new Random(7)))
+        foreach (var batchData in evalSet.GetBatches(batchSize, shuffle, new Random(7), dropLast: dropLast))
         {
             using var x = torch.tensor(batchData.Images, dtype: ScalarType.Float32).reshape(batchData.Batch, 3, batchData.Height, batchData.Width).to(dev);
             using var y = torch.tensor(batchData.LabelCtc, dtype: ScalarType.Int64).reshape(batchData.Batch, maxTextLength).to(dev);
