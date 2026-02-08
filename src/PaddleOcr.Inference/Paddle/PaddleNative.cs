@@ -4,6 +4,10 @@ namespace PaddleOcr.Inference.Paddle;
 
 public sealed class PaddleNative : IDisposable
 {
+    private static readonly object DllSearchLock = new();
+    private static bool _dllSearchPrepared;
+    private static readonly List<IntPtr> DependencyHandles = new();
+
     private readonly IntPtr _library;
     private readonly Api _api;
     private bool _disposed;
@@ -30,6 +34,8 @@ public sealed class PaddleNative : IDisposable
 
     private static IntPtr LoadLibrary(string? paddleLibDir)
     {
+        PrepareNativeSearchPaths(paddleLibDir);
+
         var candidateNames = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? new[] { "paddle_inference_c.dll", "paddle_inference.dll", "paddle.dll" }
             : RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
@@ -62,6 +68,155 @@ public sealed class PaddleNative : IDisposable
         throw new DllNotFoundException(
             "Unable to load Paddle Inference C library. " +
             "Expected paddle_inference_c runtime (e.g. paddle_inference_c.dll / libpaddle_inference_c.so).");
+    }
+
+    private static void PrepareNativeSearchPaths(string? paddleLibDir)
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            return;
+        }
+
+        lock (DllSearchLock)
+        {
+            if (_dllSearchPrepared)
+            {
+                return;
+            }
+
+            var dirs = new List<string>();
+            if (!string.IsNullOrWhiteSpace(paddleLibDir) && Directory.Exists(paddleLibDir))
+            {
+                dirs.Add(paddleLibDir);
+
+                var libDir = new DirectoryInfo(paddleLibDir);
+                var paddleDir = libDir.Parent;
+                var rootDir = paddleDir?.Parent;
+                if (rootDir is not null)
+                {
+                    var mklml = Path.Combine(rootDir.FullName, "third_party", "install", "mklml", "lib");
+                    var onednn = Path.Combine(rootDir.FullName, "third_party", "install", "onednn", "lib");
+                    if (Directory.Exists(mklml))
+                    {
+                        dirs.Add(mklml);
+                    }
+
+                    if (Directory.Exists(onednn))
+                    {
+                        dirs.Add(onednn);
+                    }
+                }
+            }
+
+            var vcomp = ResolveVcomp140Path();
+            if (!string.IsNullOrWhiteSpace(vcomp))
+            {
+                dirs.Add(Path.GetDirectoryName(vcomp)!);
+            }
+
+            TrySetDefaultDllDirectories();
+            foreach (var dir in dirs.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                TryAddDllDirectory(dir);
+            }
+
+            TryPreloadDependencies(dirs, vcomp);
+            _dllSearchPrepared = true;
+        }
+    }
+
+    private static void TryPreloadDependencies(IReadOnlyList<string> dirs, string? vcompPath)
+    {
+        var preloadNames = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? new[] { "common.dll", "libiomp5md.dll", "mklml.dll", "mkldnn.dll" }
+            : Array.Empty<string>();
+        foreach (var dir in dirs)
+        {
+            foreach (var name in preloadNames)
+            {
+                var full = Path.Combine(dir, name);
+                TryLoadDependency(full);
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(vcompPath))
+        {
+            TryLoadDependency(vcompPath);
+        }
+        else
+        {
+            TryLoadDependency("vcomp140.dll");
+        }
+    }
+
+    private static void TryLoadDependency(string fileOrName)
+    {
+        try
+        {
+            if (NativeLibrary.TryLoad(fileOrName, out var handle) && handle != IntPtr.Zero)
+            {
+                DependencyHandles.Add(handle);
+            }
+        }
+        catch
+        {
+            // Ignore. Main load path will surface a clear error if unresolved.
+        }
+    }
+
+    private static string? ResolveVcomp140Path()
+    {
+        try
+        {
+            var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            if (string.IsNullOrWhiteSpace(programFiles))
+            {
+                return null;
+            }
+
+            var vsRoot = Path.Combine(programFiles, "Microsoft Visual Studio");
+            if (!Directory.Exists(vsRoot))
+            {
+                return null;
+            }
+
+            return Directory
+                .EnumerateFiles(vsRoot, "vcomp140.dll", SearchOption.AllDirectories)
+                .FirstOrDefault();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static void TrySetDefaultDllDirectories()
+    {
+        try
+        {
+            _ = SetDefaultDllDirectories(LoadLibrarySearchDefaultDirs | LoadLibrarySearchUserDirs);
+        }
+        catch
+        {
+            // Ignore on unsupported systems.
+        }
+    }
+
+    private static void TryAddDllDirectory(string dir)
+    {
+        if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir))
+        {
+            return;
+        }
+
+        try
+        {
+            _ = AddDllDirectory(dir);
+        }
+        catch
+        {
+            // Ignore and continue.
+        }
     }
 
     private static (string GraphPath, string ParamsPath) ResolveModelArtifacts(string modelDirOrFile, string? modelParamsFile)
@@ -353,6 +508,15 @@ public sealed class PaddleNative : IDisposable
         public readonly nuint Size;
         public readonly IntPtr Data;
     }
+
+    private const uint LoadLibrarySearchDefaultDirs = 0x00001000;
+    private const uint LoadLibrarySearchUserDirs = 0x00000400;
+
+    [DllImport("kernel32", SetLastError = true)]
+    private static extern bool SetDefaultDllDirectories(uint directoryFlags);
+
+    [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr AddDllDirectory(string newDirectory);
 
     internal sealed class Api
     {

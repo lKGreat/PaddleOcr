@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using PaddleOcr.Core.Cli;
 using PaddleOcr.Core.Errors;
 using PaddleOcr.Training.Runtime;
@@ -67,8 +67,15 @@ public sealed class TrainingExecutor : ICommandExecutor
 
             if (string.Equals(cfg.ModelType, "rec", StringComparison.OrdinalIgnoreCase))
             {
-                // 检测配置中是否有完整的架构配置
-                if (cfg.HasArchitectureConfig())
+                var forceSimpleForTeacher = !string.IsNullOrWhiteSpace(cfg.TeacherModelDir);
+                if (forceSimpleForTeacher)
+                {
+                    context.Logger.LogInformation(
+                        "rec trainer route: force SimpleRecTrainer due to teacher_model_dir={TeacherModelDir}",
+                        cfg.TeacherModelDir);
+                }
+
+                if (!forceSimpleForTeacher)
                 {
                     var trainer = new Rec.ConfigDrivenRecTrainer(context.Logger);
                     if (subCommand.Equals("train", StringComparison.OrdinalIgnoreCase))
@@ -80,19 +87,16 @@ public sealed class TrainingExecutor : ICommandExecutor
                     var eval = trainer.Eval(cfg);
                     return Task.FromResult(CommandResult.Ok($"eval completed: acc={eval.Accuracy:F4}, samples={eval.Samples}"));
                 }
-                else
-                {
-                    // 回退到 SimpleRecTrainer
-                    var trainer = new SimpleRecTrainer(context.Logger);
-                    if (subCommand.Equals("train", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var summary = trainer.Train(cfg);
-                        return Task.FromResult(CommandResult.Ok($"train completed: best_acc={summary.BestAccuracy:F4}, save_dir={summary.SaveDir}"));
-                    }
 
-                    var eval = trainer.Eval(cfg);
-                    return Task.FromResult(CommandResult.Ok($"eval completed: acc={eval.Accuracy:F4}, samples={eval.Samples}"));
+                var simpleTrainer = new SimpleRecTrainer(context.Logger);
+                if (subCommand.Equals("train", StringComparison.OrdinalIgnoreCase))
+                {
+                    var summary = simpleTrainer.Train(cfg);
+                    return Task.FromResult(CommandResult.Ok($"train completed: best_acc={summary.BestAccuracy:F4}, save_dir={summary.SaveDir}"));
                 }
+
+                var simpleEval = simpleTrainer.Eval(cfg);
+                return Task.FromResult(CommandResult.Ok($"eval completed: acc={simpleEval.Accuracy:F4}, samples={simpleEval.Samples}"));
             }
 
             return Task.FromResult(CommandResult.Fail($"model_type '{cfg.ModelType}' not supported yet. Current implementation supports cls/det/rec."));

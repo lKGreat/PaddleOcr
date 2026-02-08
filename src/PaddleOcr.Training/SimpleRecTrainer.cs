@@ -1,5 +1,6 @@
 ﻿using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using PaddleOcr.Inference.Paddle;
 using PaddleOcr.Training.Runtime;
 using TorchSharp;
 using static TorchSharp.torch;
@@ -38,6 +39,19 @@ internal sealed class SimpleRecTrainer
         {
             TryLoadCheckpoint(model, resumeCkpt);
         }
+
+        using var teacher = RecTeacherDistiller.TryCreate(cfg, _logger, shape.H, shape.W, cfg.MaxTextLength, vocab.Count + 1);
+        var distillEnabled = teacher is not null;
+        if (distillEnabled)
+        {
+            _logger.LogInformation(
+                "teacher-student distill enabled: teacher={TeacherDir}, alpha={Alpha:F3}, temp={Temp:F3}, strict={Strict}",
+                cfg.TeacherModelDir,
+                cfg.DistillWeight,
+                cfg.DistillTemperature,
+                cfg.StrictTeacherStudent);
+        }
+
         var optimizer = torch.optim.Adam(model.parameters(), lr: lr);
 
         var rng = new Random(1024);
@@ -57,6 +71,8 @@ internal sealed class SimpleRecTrainer
 
             model.train();
             var lossSum = 0f;
+            var ceLossSum = 0f;
+            var kdLossSum = 0f;
             var sampleCount = 0;
             foreach (var (images, labels, batch) in trainSet.GetBatches(cfg.BatchSize, shuffle: true, rng))
             {
@@ -64,19 +80,53 @@ internal sealed class SimpleRecTrainer
                 using var y = torch.tensor(labels, dtype: ScalarType.Int64).reshape(batch, cfg.MaxTextLength).to(dev);
                 optimizer.zero_grad();
                 using var logits = model.call(x); // [B,T,V]
-                using var loss = functional.cross_entropy(logits.reshape(batch * cfg.MaxTextLength, vocab.Count + 1), y.reshape(batch * cfg.MaxTextLength));
-                loss.backward();
-                if (cfg.GradClipNorm > 0f)
-                {
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.GradClipNorm);
-                }
-                optimizer.step();
 
-                lossSum += loss.ToSingle() * batch;
-                sampleCount += batch;
+                var ceLoss = functional.cross_entropy(logits.reshape(batch * cfg.MaxTextLength, vocab.Count + 1), y.reshape(batch * cfg.MaxTextLength));
+                Tensor? kdLoss = null;
+                Tensor? totalLoss = ceLoss;
+                try
+                {
+                    if (distillEnabled && teacher is not null)
+                    {
+                        var teacherBatch = teacher.Run(images, batch, shape.H, shape.W);
+                        using var teacherLogits = torch.tensor(teacherBatch.Data, dtype: ScalarType.Float32)
+                            .reshape(batch, teacherBatch.TimeSteps, teacherBatch.NumClasses)
+                            .to(dev);
+                        kdLoss = ComputeDistillLoss(logits, teacherLogits, cfg.DistillTemperature);
+                        totalLoss = ceLoss * (1f - cfg.DistillWeight) + kdLoss * cfg.DistillWeight;
+                    }
+
+                    totalLoss.backward();
+                    if (cfg.GradClipNorm > 0f)
+                    {
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.GradClipNorm);
+                    }
+
+                    optimizer.step();
+
+                    var totalLossVal = totalLoss.ToSingle();
+                    var ceLossVal = ceLoss.ToSingle();
+                    var kdLossVal = kdLoss?.ToSingle() ?? 0f;
+                    lossSum += totalLossVal * batch;
+                    ceLossSum += ceLossVal * batch;
+                    kdLossSum += kdLossVal * batch;
+                    sampleCount += batch;
+                }
+                finally
+                {
+                    if (!ReferenceEquals(totalLoss, ceLoss))
+                    {
+                        totalLoss?.Dispose();
+                    }
+
+                    kdLoss?.Dispose();
+                    ceLoss.Dispose();
+                }
             }
 
             var trainLoss = sampleCount == 0 ? 0f : lossSum / sampleCount;
+            var trainCeLoss = sampleCount == 0 ? 0f : ceLossSum / sampleCount;
+            var trainKdLoss = sampleCount == 0 ? 0f : kdLossSum / sampleCount;
             var evalMetrics = Evaluate(model, evalSet, cfg.EvalBatchSize, shape.H, shape.W, cfg.MaxTextLength, dev, vocab);
 
             if (evalMetrics.Accuracy > bestAcc)
@@ -91,9 +141,31 @@ internal sealed class SimpleRecTrainer
             }
 
             SaveCheckpoint(cfg.SaveModelDir, model, "latest.pt");
-            _logger.LogInformation(
-                "epoch={Epoch}/{Total} train_loss={Loss:F4} eval_acc={EvalAcc:F4} eval_char_acc={CharAcc:F4} eval_edit={Edit:F4}",
-                epoch, cfg.EpochNum, trainLoss, evalMetrics.Accuracy, evalMetrics.CharacterAccuracy, evalMetrics.AvgEditDistance);
+            if (distillEnabled)
+            {
+                _logger.LogInformation(
+                    "epoch={Epoch}/{Total} train_loss={Loss:F4} train_ce={Ce:F4} train_kd={Kd:F4} eval_acc={EvalAcc:F4} eval_char_acc={CharAcc:F4} eval_edit={Edit:F4}",
+                    epoch,
+                    cfg.EpochNum,
+                    trainLoss,
+                    trainCeLoss,
+                    trainKdLoss,
+                    evalMetrics.Accuracy,
+                    evalMetrics.CharacterAccuracy,
+                    evalMetrics.AvgEditDistance);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "epoch={Epoch}/{Total} train_loss={Loss:F4} eval_acc={EvalAcc:F4} eval_char_acc={CharAcc:F4} eval_edit={Edit:F4}",
+                    epoch,
+                    cfg.EpochNum,
+                    trainLoss,
+                    evalMetrics.Accuracy,
+                    evalMetrics.CharacterAccuracy,
+                    evalMetrics.AvgEditDistance);
+            }
+
             epochsCompleted = epoch;
             if (cfg.EarlyStopPatience > 0 && staleEpochs >= cfg.EarlyStopPatience)
             {
@@ -134,8 +206,22 @@ internal sealed class SimpleRecTrainer
             JsonSerializer.Serialize(metrics, new JsonSerializerOptions { WriteIndented = true }));
         _logger.LogInformation(
             "rec eval_acc={EvalAcc:F4} char_acc={CharAcc:F4} avg_edit={Edit:F4} samples={Samples}",
-            metrics.Accuracy, metrics.CharacterAccuracy, metrics.AvgEditDistance, summary.Samples);
+            metrics.Accuracy,
+            metrics.CharacterAccuracy,
+            metrics.AvgEditDistance,
+            summary.Samples);
         return summary;
+    }
+
+    private static Tensor ComputeDistillLoss(Tensor studentLogits, Tensor teacherLogits, float temperature)
+    {
+        using var studentScaled = studentLogits / temperature;
+        using var teacherScaled = teacherLogits / temperature;
+        using var studentLogProb = functional.log_softmax(studentScaled, dim: -1);
+        using var teacherProb = functional.softmax(teacherScaled, dim: -1);
+        using var teacherLogProb = functional.log_softmax(teacherScaled, dim: -1);
+        using var tokenKl = (teacherProb * (teacherLogProb - studentLogProb)).sum(dim: -1);
+        return tokenKl.mean() * (temperature * temperature);
     }
 
     private static RecEvalMetrics Evaluate(SimpleRecNet model, SimpleRecDataset evalSet, int batchSize, int h, int w, int maxTextLength, Device dev, IReadOnlyList<char> vocab)
@@ -167,6 +253,7 @@ internal sealed class SimpleRecTrainer
                 {
                     correct++;
                 }
+
                 var edit = Levenshtein(predText, gtText);
                 editSum += edit;
                 charErrors += edit;
@@ -314,13 +401,12 @@ internal sealed class SimpleRecTrainer
                     continue;
                 }
 
-                var split = line.Split('\t', 2);
-                if (split.Length < 2)
+                if (!RecLabelLineParser.TryParse(line, out _, out var text))
                 {
                     continue;
                 }
 
-                foreach (var ch in split[1])
+                foreach (var ch in text)
                 {
                     if (!charToId.ContainsKey(ch))
                     {
@@ -339,6 +425,258 @@ internal sealed class SimpleRecTrainer
 }
 
 internal sealed record RecEvalMetrics(float Accuracy, float CharacterAccuracy, float AvgEditDistance);
+
+internal sealed class RecTeacherDistiller : IDisposable
+{
+    private readonly PaddleNative? _native;
+    private readonly PaddleNative.PaddlePredictor? _predictor;
+    private readonly SimpleRecNet? _torchTeacher;
+    private readonly Device _teacherDevice;
+    private readonly int _imageH;
+    private readonly int _imageW;
+
+    private RecTeacherDistiller(
+        PaddleNative native,
+        PaddleNative.PaddlePredictor predictor,
+        int timeSteps,
+        int numClasses,
+        int imageH,
+        int imageW)
+    {
+        _native = native;
+        _predictor = predictor;
+        _imageH = imageH;
+        _imageW = imageW;
+        _teacherDevice = torch.CPU;
+        TimeSteps = timeSteps;
+        NumClasses = numClasses;
+    }
+
+    private RecTeacherDistiller(SimpleRecNet teacher, Device teacherDevice, int timeSteps, int numClasses, int imageH, int imageW)
+    {
+        _torchTeacher = teacher;
+        _teacherDevice = teacherDevice;
+        _imageH = imageH;
+        _imageW = imageW;
+        TimeSteps = timeSteps;
+        NumClasses = numClasses;
+    }
+
+    public int TimeSteps { get; }
+
+    public int NumClasses { get; }
+
+    public static RecTeacherDistiller? TryCreate(
+        TrainingConfigView cfg,
+        ILogger logger,
+        int imageH,
+        int imageW,
+        int studentTimeSteps,
+        int studentNumClasses)
+    {
+        if (string.IsNullOrWhiteSpace(cfg.TeacherModelDir))
+        {
+            return null;
+        }
+
+        if (cfg.DistillWeight <= 0f)
+        {
+            throw new InvalidOperationException("Global.teacher_model_dir is set but Global.distill_weight <= 0. Set distill_weight in (0,1].");
+        }
+
+        var teacherPath = cfg.TeacherModelDir!;
+        if (!Directory.Exists(teacherPath) && !File.Exists(teacherPath))
+        {
+            throw new FileNotFoundException($"Teacher model directory not found: {teacherPath}");
+        }
+
+        var torchTeacherPath = ResolveTorchTeacherCheckpoint(teacherPath);
+        if (!string.IsNullOrWhiteSpace(torchTeacherPath))
+        {
+            return CreateTorchTeacher(
+                torchTeacherPath!,
+                logger,
+                imageH,
+                imageW,
+                studentTimeSteps,
+                studentNumClasses,
+                cfg.StrictTeacherStudent);
+        }
+
+        if (!Directory.Exists(teacherPath))
+        {
+            throw new FileNotFoundException($"Teacher model directory not found: {teacherPath}");
+        }
+
+        var graphExists = File.Exists(Path.Combine(teacherPath, "inference.json")) ||
+                          File.Exists(Path.Combine(teacherPath, "inference.pdmodel"));
+        var paramsExists = File.Exists(Path.Combine(teacherPath, "inference.pdiparams"));
+        if (!graphExists || !paramsExists)
+        {
+            throw new FileNotFoundException(
+                $"Teacher model dir must contain inference graph + params: {teacherPath} (need inference.json|inference.pdmodel and inference.pdiparams), " +
+                "or a torch teacher checkpoint (*.pt).");
+        }
+
+        PaddleNative? native = null;
+        PaddleNative.PaddlePredictor? predictor = null;
+        try
+        {
+            native = PaddleNative.Create(cfg.TeacherPaddleLibDir);
+            predictor = native.CreatePredictor(teacherPath);
+
+            var dryInput = new float[3 * imageH * imageW];
+            var dry = predictor.Run(dryInput, [1, 3, imageH, imageW], 1f);
+            if (dry.Dims.Length != 3)
+            {
+                throw new InvalidOperationException(
+                    $"Teacher output must be rank-3 [B,T,C], but got [{string.Join(",", dry.Dims)}]");
+            }
+
+            var teacherTime = dry.Dims[1];
+            var teacherClasses = dry.Dims[2];
+            var mismatch = teacherTime != studentTimeSteps || teacherClasses != studentNumClasses;
+            if (mismatch)
+            {
+                var msg =
+                    $"Teacher/student logits shape mismatch: teacher=[T:{teacherTime}, C:{teacherClasses}], student=[T:{studentTimeSteps}, C:{studentNumClasses}]. " +
+                    "Use same dict/max_text_length as teacher model.";
+                if (cfg.StrictTeacherStudent)
+                {
+                    throw new InvalidOperationException(msg);
+                }
+
+                logger.LogWarning("{Message} distillation disabled because strict_teacher_student=false", msg);
+                predictor.Dispose();
+                native.Dispose();
+                return null;
+            }
+
+            logger.LogInformation(
+                "teacher loaded: dir={Dir}, logits=[T:{T}, C:{C}]",
+                cfg.TeacherModelDir,
+                teacherTime,
+                teacherClasses);
+
+            return new RecTeacherDistiller(native, predictor, teacherTime, teacherClasses, imageH, imageW);
+        }
+        catch
+        {
+            predictor?.Dispose();
+            native?.Dispose();
+            throw;
+        }
+    }
+
+    public (float[] Data, int TimeSteps, int NumClasses) Run(float[] batchImages, int batchSize, int imageH, int imageW)
+    {
+        if (imageH != _imageH || imageW != _imageW)
+        {
+            throw new InvalidOperationException($"Teacher image shape mismatch: expected [{_imageH},{_imageW}], got [{imageH},{imageW}]");
+        }
+
+        if (_predictor is not null)
+        {
+            var result = _predictor.Run(batchImages, [batchSize, 3, imageH, imageW], 1f);
+            if (result.Dims.Length != 3)
+            {
+                throw new InvalidOperationException($"Teacher output must be rank-3 [B,T,C], but got [{string.Join(",", result.Dims)}]");
+            }
+
+            if (result.Dims[0] != batchSize || result.Dims[1] != TimeSteps || result.Dims[2] != NumClasses)
+            {
+                throw new InvalidOperationException(
+                    $"Teacher output shape changed unexpectedly: got [{string.Join(",", result.Dims)}], expected [{batchSize},{TimeSteps},{NumClasses}]");
+            }
+
+            return (result.Data, TimeSteps, NumClasses);
+        }
+
+        if (_torchTeacher is null)
+        {
+            throw new InvalidOperationException("Teacher is not initialized.");
+        }
+
+        using var noGrad = torch.no_grad();
+        using var x = torch.tensor(batchImages, dtype: ScalarType.Float32)
+            .reshape(batchSize, 3, imageH, imageW)
+            .to(_teacherDevice);
+        using var logits = _torchTeacher.call(x).to(torch.CPU);
+        var output = logits.data<float>().ToArray();
+        return (output, TimeSteps, NumClasses);
+    }
+
+    public void Dispose()
+    {
+        _predictor?.Dispose();
+        _native?.Dispose();
+        _torchTeacher?.Dispose();
+    }
+
+    private static string? ResolveTorchTeacherCheckpoint(string teacherPath)
+    {
+        if (File.Exists(teacherPath) && Path.GetExtension(teacherPath).Equals(".pt", StringComparison.OrdinalIgnoreCase))
+        {
+            return teacherPath;
+        }
+
+        if (!Directory.Exists(teacherPath))
+        {
+            return null;
+        }
+
+        var best = Path.Combine(teacherPath, "best.pt");
+        if (File.Exists(best))
+        {
+            return best;
+        }
+
+        var latest = Path.Combine(teacherPath, "latest.pt");
+        if (File.Exists(latest))
+        {
+            return latest;
+        }
+
+        return null;
+    }
+
+    private static RecTeacherDistiller? CreateTorchTeacher(
+        string checkpointPath,
+        ILogger logger,
+        int imageH,
+        int imageW,
+        int studentTimeSteps,
+        int studentNumClasses,
+        bool strictTeacherStudent)
+    {
+        var device = torch.CPU;
+        var teacher = new SimpleRecNet(studentNumClasses, studentTimeSteps);
+        teacher.to(device);
+        try
+        {
+            teacher.load(checkpointPath);
+            teacher.eval();
+        }
+        catch
+        {
+            teacher.Dispose();
+            throw;
+        }
+
+        logger.LogInformation(
+            "teacher loaded (torch checkpoint): file={Path}, logits=[T:{T}, C:{C}]",
+            checkpointPath,
+            studentTimeSteps,
+            studentNumClasses);
+
+        if (!strictTeacherStudent)
+        {
+            // Current torch teacher mode is shape-locked to student architecture by construction.
+        }
+
+        return new RecTeacherDistiller(teacher, device, studentTimeSteps, studentNumClasses, imageH, imageW);
+    }
+}
 
 internal sealed class SimpleRecNet : Module<Tensor, Tensor>
 {

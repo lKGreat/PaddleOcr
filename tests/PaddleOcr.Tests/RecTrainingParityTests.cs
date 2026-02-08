@@ -1,6 +1,7 @@
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using PaddleOcr.Config;
+using PaddleOcr.Core.Errors;
 using PaddleOcr.Training;
 
 namespace PaddleOcr.Tests;
@@ -123,6 +124,91 @@ public sealed class RecTrainingParityTests
         Directory.EnumerateFiles(output, "iter_step_*.pt").Should().NotBeEmpty();
         File.Exists(Path.Combine(output, "train_trace.jsonl")).Should().BeTrue();
         File.Exists(Path.Combine(output, "train_epoch_summary.jsonl")).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task TrainRec_WithTeacherModelDir_Should_Force_SimpleTrainer_And_Validate_Teacher()
+    {
+        var root = FindRepoRoot();
+        var samples = Path.Combine(root, "assets", "samples", "tiny_rec");
+        var trainLabel = Path.Combine(samples, "train.txt");
+        var evalLabel = Path.Combine(samples, "test.txt");
+        var dict = Path.Combine(samples, "dict.txt");
+        var output = Path.Combine(Path.GetTempPath(), "pocr_rec_teacher_route_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(output);
+
+        try
+        {
+            var cfgPath = Path.Combine(output, "rec_teacher_route.yml");
+            await File.WriteAllTextAsync(cfgPath,
+                $$"""
+                  Global:
+                    epoch_num: 1
+                    save_model_dir: {{output.Replace("\\", "/")}}
+                    resume_training: false
+                    device: cpu
+                    teacher_model_dir: {{Path.Combine(output, "missing_teacher").Replace("\\", "/")}}
+                    distill_weight: 0.5
+                    strict_teacher_student: true
+                    character_dict_path: {{dict.Replace("\\", "/")}}
+                    max_text_length: 2
+                    use_space_char: true
+                  Optimizer:
+                    name: Adam
+                    lr:
+                      learning_rate: 0.001
+                  Architecture:
+                    model_type: rec
+                    algorithm: SVTR_LCNet
+                    Backbone:
+                      name: MobileNetV1Enhance
+                    Head:
+                      name: CTCHead
+                  Loss:
+                    name: CTCLoss
+                  Train:
+                    dataset:
+                      data_dir: {{samples.Replace("\\", "/")}}
+                      label_file_list:
+                        - {{trainLabel.Replace("\\", "/")}}
+                      transforms:
+                        - RecResizeImg:
+                            image_shape: [3, 48, 192]
+                    loader:
+                      batch_size_per_card: 1
+                  Eval:
+                    dataset:
+                      data_dir: {{samples.Replace("\\", "/")}}
+                      label_file_list:
+                        - {{evalLabel.Replace("\\", "/")}}
+                      transforms:
+                        - RecResizeImg:
+                            image_shape: [3, 48, 192]
+                    loader:
+                      batch_size_per_card: 1
+                  """);
+
+            var loader = new ConfigLoader();
+            var context = new PaddleOcr.Core.Cli.ExecutionContext(
+                NullLogger.Instance,
+                ["train", "-c", cfgPath],
+                cfgPath,
+                loader.Load(cfgPath),
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+                []);
+
+            var executor = new TrainingExecutor();
+            var act = async () => await executor.ExecuteAsync("train", context);
+            var ex = await act.Should().ThrowAsync<PocrException>();
+            ex.Which.Message.Should().Contain("Teacher model directory not found");
+        }
+        finally
+        {
+            if (Directory.Exists(output))
+            {
+                Directory.Delete(output, true);
+            }
+        }
     }
 
     private static string FindRepoRoot()

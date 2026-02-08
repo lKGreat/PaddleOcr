@@ -74,7 +74,7 @@ internal sealed class ConfigDrivenRecTrainer
 
         var optimizer = BuildOptimizer(cfg, model);
         var lrScheduler = BuildLRScheduler(cfg);
-        var lossFn = BuildLoss(cfg);
+        var lossFn = BuildLoss(cfg, gtcEncodeType);
 
         var ckptManager = new CheckpointManager(_logger);
         var ampHelper = runtime.UseAmp ? new AmpTrainingHelper(dev, enabled: true) : null;
@@ -409,28 +409,49 @@ internal sealed class ConfigDrivenRecTrainer
 
     private RecModel BuildModel(TrainingConfigView cfg, int numClasses, string? gtcEncodeType)
     {
-        var backboneName = cfg.GetArchitectureString("Backbone.name", "MobileNetV1Enhance");
+        var algorithm = cfg.GetArchitectureString("algorithm", "SVTR_LCNet");
+        var transformNameRaw = cfg.GetArchitectureString("Transform.name", string.Empty);
+        var transformName = string.IsNullOrWhiteSpace(transformNameRaw) ? null : transformNameRaw;
+        var backboneName = cfg.GetArchitectureString("Backbone.name", InferBackboneName(algorithm));
         var resolvedBackboneName = ResolveBackboneAlias(backboneName);
-        var neckName = cfg.GetArchitectureString("Neck.name", "SequenceEncoder");
+        var neckName = cfg.GetArchitectureString("Neck.name", InferNeckName(algorithm));
         var neckEncoderType = ResolveNeckEncoderType(cfg);
-        var headName = cfg.GetArchitectureString("Head.name", "CTCHead");
-        var hiddenSize = cfg.GetArchitectureInt("Head.hidden_size", 48);
-        hiddenSize = ResolveGtcHiddenSize(cfg, hiddenSize);
+        if (cfg.GetByPathPublic("Architecture.Neck.encoder_type") is null &&
+            string.Equals(neckEncoderType, "reshape", StringComparison.OrdinalIgnoreCase))
+        {
+            neckEncoderType = InferNeckEncoderType(algorithm);
+        }
+
+        var headName = cfg.GetArchitectureString("Head.name", InferHeadName(algorithm));
+        var gtcHeadName = ResolveGtcHeadName(cfg, headName, algorithm, gtcEncodeType);
+        var neckHiddenSize = ResolveNeckHiddenSize(cfg, algorithm, neckEncoderType);
+        var headHiddenSize = ResolveHeadHiddenSize(cfg, algorithm, headName, gtcHeadName);
         var maxLen = cfg.MaxTextLength;
         var inChannels = cfg.GetArchitectureInt("in_channels", 3);
-
-        var gtcHeadName = ResolveGtcHeadName(cfg);
         var gtcOutChannels = ResolveGtcOutChannels(numClasses, gtcHeadName, gtcEncodeType);
 
         _logger.LogInformation(
-                "Building model: backbone={Backbone}, neck={Neck}({NeckEncoder}), head={Head}, num_classes={Classes}, gtc_head={GtcHead}, gtc_classes={GtcClasses}",
+                "Building model: transform={Transform}, backbone={Backbone}, neck={Neck}({NeckEncoder}, hidden={NeckHidden}), head={Head}(hidden={HeadHidden}), num_classes={Classes}, gtc_head={GtcHead}, gtc_classes={GtcClasses}",
+                transformName ?? "none",
                 resolvedBackboneName,
                 neckName,
                 neckEncoderType,
+                neckHiddenSize,
                 headName,
+                headHiddenSize,
                 numClasses,
                 gtcHeadName ?? "none",
                 gtcOutChannels);
+
+        if (cfg.GetByPathPublic("Architecture.Backbone.name") is null)
+        {
+            _logger.LogInformation("Backbone.name missing in config; inferred '{Backbone}' from algorithm '{Algorithm}'", backboneName, algorithm);
+        }
+
+        if (cfg.GetByPathPublic("Architecture.Head.name") is null)
+        {
+            _logger.LogInformation("Head.name missing in config; inferred '{Head}' from algorithm '{Algorithm}'", headName, algorithm);
+        }
 
         if (!string.Equals(backboneName, resolvedBackboneName, StringComparison.OrdinalIgnoreCase))
         {
@@ -443,11 +464,13 @@ internal sealed class ConfigDrivenRecTrainer
             headName,
             numClasses,
             inChannels,
-            hiddenSize,
+            neckHiddenSize,
             maxLen,
             neckEncoderType,
             gtcHeadName,
-            gtcOutChannels);
+            gtcOutChannels,
+            transformName,
+            headHiddenSize);
     }
 
     private Optimizer BuildOptimizer(TrainingConfigView cfg, RecModel model)
@@ -498,10 +521,26 @@ internal sealed class ConfigDrivenRecTrainer
         return LRSchedulerBuilder.Build(lrName, lrConfig);
     }
 
-    private IRecLoss BuildLoss(TrainingConfigView cfg)
+    private IRecLoss BuildLoss(TrainingConfigView cfg, string? gtcEncodeType)
     {
-        var lossName = cfg.GetLossString("name", "CTCLoss");
+        var algorithm = cfg.GetArchitectureString("algorithm", "SVTR_LCNet");
+        var headName = cfg.GetArchitectureString("Head.name", InferHeadName(algorithm));
+        var gtcHeadName = ResolveGtcHeadName(cfg, headName, algorithm, gtcEncodeType);
+        var configuredLossName = cfg.GetLossString("name", string.Empty);
+        var lossName = string.IsNullOrWhiteSpace(configuredLossName)
+            ? InferLossName(headName)
+            : configuredLossName;
         var lossConfig = cfg.GetLossConfig();
+        if (string.IsNullOrWhiteSpace(configuredLossName))
+        {
+            _logger.LogInformation("Loss.name missing in config; inferred '{Loss}' from head '{Head}'", lossName, headName);
+        }
+
+        if (lossName.Equals("MultiLoss", StringComparison.OrdinalIgnoreCase))
+        {
+            EnsureMultiLossConfig(lossConfig, gtcHeadName, gtcEncodeType);
+        }
+
         return RecLossBuilder.Build(lossName, lossConfig);
     }
 
@@ -780,13 +819,12 @@ internal sealed class ConfigDrivenRecTrainer
                     continue;
                 }
 
-                var split = line.Split('\t', 2);
-                if (split.Length < 2)
+                if (!RecLabelLineParser.TryParse(line, out _, out var text))
                 {
                     continue;
                 }
 
-                foreach (var ch in split[1])
+                foreach (var ch in text)
                 {
                     if (!charToId.ContainsKey(ch))
                     {
@@ -847,7 +885,7 @@ internal sealed class ConfigDrivenRecTrainer
         var transforms = cfg.GetByPathPublic("Train.dataset.transforms");
         if (transforms is not IList<object?> list)
         {
-            return null;
+            return InferGtcEncodeTypeFromConfig(cfg);
         }
 
         foreach (var item in list)
@@ -865,7 +903,7 @@ internal sealed class ConfigDrivenRecTrainer
             }
         }
 
-        return null;
+        return InferGtcEncodeTypeFromConfig(cfg);
     }
 
     private static IRecLabelEncoder? CreateGtcEncoder(string? gtcEncodeType, TrainingConfigView cfg)
@@ -875,30 +913,39 @@ internal sealed class ConfigDrivenRecTrainer
             return null;
         }
 
-        return gtcEncodeType switch
+        return gtcEncodeType.Trim().ToLowerInvariant() switch
         {
-            "NRTRLabelEncode" => new NRTRLabelEncode(cfg.MaxTextLength, cfg.RecCharDictPath, cfg.UseSpaceChar),
-            "SARLabelEncode" => new SARLabelEncode(cfg.MaxTextLength, cfg.RecCharDictPath, cfg.UseSpaceChar),
-            "AttnLabelEncode" => new AttnLabelEncode(cfg.MaxTextLength, cfg.RecCharDictPath, cfg.UseSpaceChar),
+            "nrtrlabelencode" => new NRTRLabelEncode(cfg.MaxTextLength, cfg.RecCharDictPath, cfg.UseSpaceChar),
+            "sarlabelencode" => new SARLabelEncode(cfg.MaxTextLength, cfg.RecCharDictPath, cfg.UseSpaceChar),
+            "attnlabelencode" => new AttnLabelEncode(cfg.MaxTextLength, cfg.RecCharDictPath, cfg.UseSpaceChar),
             _ => null
         };
     }
 
-    private static string? ResolveGtcHeadName(TrainingConfigView cfg)
+    private static string? ResolveGtcHeadName(TrainingConfigView cfg, string headName, string algorithm, string? gtcEncodeType)
     {
         var raw = cfg.GetByPathPublic("Architecture.Head.head_list");
-        if (raw is not IList<object?> list || list.Count < 2)
+        if (raw is IList<object?> list && list.Count >= 2)
+        {
+            var second = list[1];
+            if (second is Dictionary<string, object?> headDict && headDict.Count > 0)
+            {
+                return headDict.Keys.FirstOrDefault();
+            }
+        }
+
+        if (!IsMultiHead(headName))
         {
             return null;
         }
 
-        var second = list[1];
-        if (second is not Dictionary<string, object?> headDict || headDict.Count == 0)
+        var fromEncode = InferGtcHeadNameFromEncode(gtcEncodeType);
+        if (!string.IsNullOrWhiteSpace(fromEncode))
         {
-            return null;
+            return fromEncode;
         }
 
-        return headDict.Keys.FirstOrDefault();
+        return InferDefaultGtcHeadName(algorithm);
     }
 
     private static string ResolveNeckEncoderType(TrainingConfigView cfg)
@@ -934,36 +981,357 @@ internal sealed class ConfigDrivenRecTrainer
         return string.IsNullOrWhiteSpace(fromHead) ? "reshape" : fromHead;
     }
 
-    private static int ResolveGtcHiddenSize(TrainingConfigView cfg, int fallback)
+    private static string InferBackboneName(string algorithm)
+    {
+        return algorithm.Trim().ToLowerInvariant() switch
+        {
+            "svtr_lcnet" or "svtrlcnet" => "PPLCNetV3",
+            "svtr_hgnet" or "svtrhgnet" => "PPHGNetV2_B4",
+            "crnn" => "MobileNetV3",
+            "svtr" or "svtrnet" => "SVTRNet",
+            "nrtr" => "MTB",
+            "sar" => "ResNet31",
+            "robustscanner" => "ResNet31",
+            _ => "MobileNetV1Enhance"
+        };
+    }
+
+    private static string InferNeckName(string algorithm)
+    {
+        return algorithm.Trim().ToLowerInvariant() switch
+        {
+            _ => "SequenceEncoder"
+        };
+    }
+
+    private static string InferNeckEncoderType(string algorithm)
+    {
+        return algorithm.Trim().ToLowerInvariant() switch
+        {
+            "svtr_lcnet" or "svtrlcnet" or "svtr_hgnet" or "svtrhgnet" or "svtr" or "svtrnet" => "svtr",
+            "crnn" => "rnn",
+            _ => "reshape"
+        };
+    }
+
+    private static string InferHeadName(string algorithm)
+    {
+        return algorithm.Trim().ToLowerInvariant() switch
+        {
+            "svtr_lcnet" or "svtrlcnet" or "svtr_hgnet" or "svtrhgnet" => "MultiHead",
+            "sar" => "SARHead",
+            "nrtr" => "NRTRHead",
+            "srn" => "SRNHead",
+            "robustscanner" => "RobustScannerHead",
+            _ => "CTCHead"
+        };
+    }
+
+    private static int InferHeadHiddenSize(string algorithm, string headName)
+    {
+        var alg = algorithm.Trim().ToLowerInvariant();
+        var head = headName.Trim().ToLowerInvariant();
+        if (head.Contains("sar", StringComparison.OrdinalIgnoreCase))
+        {
+            return 512;
+        }
+
+        if (head.Contains("nrtr", StringComparison.OrdinalIgnoreCase))
+        {
+            return 384;
+        }
+
+        return alg switch
+        {
+            "svtr_lcnet" or "svtrlcnet" or "svtr_hgnet" or "svtrhgnet" => 120,
+            "crnn" => 96,
+            _ => 48
+        };
+    }
+
+    private static int ResolveNeckHiddenSize(TrainingConfigView cfg, string algorithm, string neckEncoderType)
+    {
+        var direct = cfg.GetArchitectureInt("Neck.hidden_size", 0);
+        if (direct > 0)
+        {
+            return direct;
+        }
+
+        var fromHeadList = TryResolveCtcNeckHiddenSize(cfg);
+        if (fromHeadList > 0)
+        {
+            return fromHeadList;
+        }
+
+        return InferNeckHiddenSize(algorithm, neckEncoderType);
+    }
+
+    private static int ResolveHeadHiddenSize(TrainingConfigView cfg, string algorithm, string headName, string? gtcHeadName)
+    {
+        var direct = cfg.GetArchitectureInt("Head.hidden_size", 0);
+        if (direct > 0)
+        {
+            return direct;
+        }
+
+        var fromHeadList = TryResolveGtcHeadHiddenSize(cfg);
+        if (fromHeadList > 0)
+        {
+            return fromHeadList;
+        }
+
+        if (IsMultiHead(headName))
+        {
+            var gtcFallback = InferHeadHiddenSize(algorithm, gtcHeadName ?? string.Empty);
+            if (gtcFallback > 0)
+            {
+                return gtcFallback;
+            }
+        }
+
+        return InferHeadHiddenSize(algorithm, headName);
+    }
+
+    private static int TryResolveCtcNeckHiddenSize(TrainingConfigView cfg)
+    {
+        var raw = cfg.GetByPathPublic("Architecture.Head.head_list");
+        if (raw is not IList<object?> list || list.Count == 0)
+        {
+            return 0;
+        }
+
+        if (list[0] is not Dictionary<string, object?> firstHead ||
+            !firstHead.TryGetValue("CTCHead", out var ctcCfgRaw) ||
+            ctcCfgRaw is not Dictionary<string, object?> ctcCfg ||
+            !ctcCfg.TryGetValue("Neck", out var neckCfgRaw) ||
+            neckCfgRaw is not Dictionary<string, object?> neckCfg)
+        {
+            return 0;
+        }
+
+        if (TryParsePositiveInt(neckCfg.TryGetValue("dims", out var dimsRaw) ? dimsRaw : null, out var dims))
+        {
+            return dims;
+        }
+
+        if (TryParsePositiveInt(neckCfg.TryGetValue("hidden_dims", out var hiddenDimsRaw) ? hiddenDimsRaw : null, out var hiddenDims))
+        {
+            return hiddenDims;
+        }
+
+        if (TryParsePositiveInt(neckCfg.TryGetValue("hidden_size", out var hiddenSizeRaw) ? hiddenSizeRaw : null, out var hiddenSize))
+        {
+            return hiddenSize;
+        }
+
+        return 0;
+    }
+
+    private static int TryResolveGtcHeadHiddenSize(TrainingConfigView cfg)
     {
         var raw = cfg.GetByPathPublic("Architecture.Head.head_list");
         if (raw is not IList<object?> list || list.Count < 2)
         {
-            return fallback;
+            return 0;
         }
 
         var second = list[1];
         if (second is not Dictionary<string, object?> headDict || headDict.Count == 0)
         {
-            return fallback;
+            return 0;
         }
 
         var headKv = headDict.First();
         if (headKv.Value is not Dictionary<string, object?> headCfg)
         {
-            return fallback;
+            return 0;
         }
 
         var key = headKv.Key;
         if (key.Contains("NRTR", StringComparison.OrdinalIgnoreCase) &&
-            headCfg.TryGetValue("nrtr_dim", out var nrtrDimRaw) &&
-            int.TryParse(nrtrDimRaw?.ToString(), out var nrtrDim) &&
-            nrtrDim > 0)
+            TryParsePositiveInt(headCfg.TryGetValue("nrtr_dim", out var nrtrDimRaw) ? nrtrDimRaw : null, out var nrtrDim))
         {
             return nrtrDim;
         }
 
-        return fallback;
+        if (key.Contains("SAR", StringComparison.OrdinalIgnoreCase) &&
+            TryParsePositiveInt(headCfg.TryGetValue("enc_dim", out var encDimRaw) ? encDimRaw : null, out var encDim))
+        {
+            return encDim;
+        }
+
+        if ((key.Contains("Attn", StringComparison.OrdinalIgnoreCase) || key.Contains("Attention", StringComparison.OrdinalIgnoreCase)) &&
+            TryParsePositiveInt(headCfg.TryGetValue("hidden_size", out var hiddenRaw) ? hiddenRaw : null, out var hiddenSize))
+        {
+            return hiddenSize;
+        }
+
+        return 0;
+    }
+
+    private static int InferNeckHiddenSize(string algorithm, string neckEncoderType)
+    {
+        var alg = algorithm.Trim().ToLowerInvariant();
+        var neck = neckEncoderType.Trim().ToLowerInvariant();
+        if (alg is "svtr_lcnet" or "svtrlcnet" or "svtr_hgnet" or "svtrhgnet" || neck == "svtr")
+        {
+            return 120;
+        }
+
+        if (neck is "rnn" or "cascadernn")
+        {
+            return 96;
+        }
+
+        return 48;
+    }
+
+    private static string? InferGtcEncodeTypeFromConfig(TrainingConfigView cfg)
+    {
+        var algorithm = cfg.GetArchitectureString("algorithm", "SVTR_LCNet");
+        var headName = cfg.GetArchitectureString("Head.name", InferHeadName(algorithm));
+        var gtcHeadName = ResolveGtcHeadName(cfg, headName, algorithm, gtcEncodeType: null);
+        return InferGtcEncodeTypeFromHeadName(gtcHeadName);
+    }
+
+    private static bool IsMultiHead(string headName)
+    {
+        return headName.Contains("multi", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? InferDefaultGtcHeadName(string algorithm)
+    {
+        return algorithm.Trim().ToLowerInvariant() switch
+        {
+            "svtr_lcnet" or "svtrlcnet" or "svtr_hgnet" or "svtrhgnet" => "NRTRHead",
+            _ => null
+        };
+    }
+
+    private static string? InferGtcHeadNameFromEncode(string? gtcEncodeType)
+    {
+        if (string.IsNullOrWhiteSpace(gtcEncodeType))
+        {
+            return null;
+        }
+
+        return gtcEncodeType.Trim().ToLowerInvariant() switch
+        {
+            "nrtrlabelencode" => "NRTRHead",
+            "sarlabelencode" => "SARHead",
+            "attnlabelencode" => "AttentionHead",
+            _ => null
+        };
+    }
+
+    private static string? InferGtcEncodeTypeFromHeadName(string? gtcHeadName)
+    {
+        if (string.IsNullOrWhiteSpace(gtcHeadName))
+        {
+            return null;
+        }
+
+        var normalized = gtcHeadName.Trim().ToLowerInvariant();
+        if (normalized.Contains("nrtr", StringComparison.OrdinalIgnoreCase))
+        {
+            return "NRTRLabelEncode";
+        }
+
+        if (normalized.Contains("sar", StringComparison.OrdinalIgnoreCase))
+        {
+            return "SARLabelEncode";
+        }
+
+        if (normalized.Contains("attn", StringComparison.OrdinalIgnoreCase) || normalized.Contains("attention", StringComparison.OrdinalIgnoreCase))
+        {
+            return "AttnLabelEncode";
+        }
+
+        return null;
+    }
+
+    private static string InferLossName(string headName)
+    {
+        var normalized = headName.Trim().ToLowerInvariant();
+        if (normalized.Contains("multi", StringComparison.OrdinalIgnoreCase))
+        {
+            return "MultiLoss";
+        }
+
+        if (normalized.Contains("sar", StringComparison.OrdinalIgnoreCase))
+        {
+            return "SARLoss";
+        }
+
+        if (normalized.Contains("nrtr", StringComparison.OrdinalIgnoreCase))
+        {
+            return "NRTRLoss";
+        }
+
+        if (normalized.Contains("attn", StringComparison.OrdinalIgnoreCase) || normalized.Contains("attention", StringComparison.OrdinalIgnoreCase))
+        {
+            return "AttentionLoss";
+        }
+
+        return "CTCLoss";
+    }
+
+    private static void EnsureMultiLossConfig(Dictionary<string, object> lossConfig, string? gtcHeadName, string? gtcEncodeType)
+    {
+        if (HasLossConfigList(lossConfig))
+        {
+            return;
+        }
+
+        var gtcLossName = InferGtcLossName(gtcHeadName, gtcEncodeType);
+        lossConfig["loss_config_list"] = new List<object?>
+        {
+            new Dictionary<string, object?> { ["CTCLoss"] = new Dictionary<string, object?>() },
+            new Dictionary<string, object?> { [gtcLossName] = new Dictionary<string, object?>() }
+        };
+    }
+
+    private static string InferGtcLossName(string? gtcHeadName, string? gtcEncodeType)
+    {
+        var normalized = (gtcHeadName ?? string.Empty).ToLowerInvariant();
+        var encode = (gtcEncodeType ?? string.Empty).ToLowerInvariant();
+        if (normalized.Contains("nrtr", StringComparison.OrdinalIgnoreCase) || encode == "nrtrlabelencode")
+        {
+            return "NRTRLoss";
+        }
+
+        if (normalized.Contains("sar", StringComparison.OrdinalIgnoreCase) || encode == "sarlabelencode")
+        {
+            return "SARLoss";
+        }
+
+        return "AttentionLoss";
+    }
+
+    private static bool HasLossConfigList(Dictionary<string, object> lossConfig)
+    {
+        if (!lossConfig.TryGetValue("loss_config_list", out var raw) || raw is null)
+        {
+            return false;
+        }
+
+        return raw switch
+        {
+            IList<object?> list => list.Count > 0,
+            System.Collections.IList list => list.Count > 0,
+            _ => false
+        };
+    }
+
+    private static bool TryParsePositiveInt(object? raw, out int value)
+    {
+        value = 0;
+        if (raw is null)
+        {
+            return false;
+        }
+
+        return int.TryParse(raw.ToString(), out value) && value > 0;
     }
 
     private static string ResolveBackboneAlias(string backboneName)

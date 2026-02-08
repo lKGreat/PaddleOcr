@@ -182,21 +182,12 @@ public sealed class SimpleRecDataset
                 continue;
             }
 
-            var split = line.Split('\t', 2);
-            if (split.Length != 2)
+            if (!RecLabelLineParser.TryParse(line, out var img, out var text))
             {
                 continue;
             }
-
-            var img = split[0].Trim();
             var fullPath = Path.IsPathRooted(img) ? img : Path.GetFullPath(Path.Combine(dataDir, img));
             if (!File.Exists(fullPath))
-            {
-                continue;
-            }
-
-            var text = split[1].Trim();
-            if (text.Length == 0)
             {
                 continue;
             }

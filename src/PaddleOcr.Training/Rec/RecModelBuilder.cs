@@ -43,7 +43,7 @@ public static class RecModelBuilder
             "densenet" => BuildDenseNet(inChannels),
             "efficientnetb3" or "efficientnet_b3" => BuildEfficientNetB3(inChannels),
             "shallowcnn" => BuildShallowCNN(inChannels),
-            "pplcnetsmall" or "pplcnetsmall_v3" => BuildPPLCNetV3(inChannels),
+            "pplcnetsmall" or "pplcnetsmall_v3" or "pplcnetv3" => BuildPPLCNetV3(inChannels),
             "micronet" => BuildMicroNet(inChannels),
             _ => BuildMobileNetV1Enhance(inChannels)
         };
@@ -120,12 +120,16 @@ public static class RecModelBuilder
         int maxLen = 25,
         string? neckEncoderType = null,
         string? gtcHeadName = null,
-        int gtcOutChannels = 0)
+        int gtcOutChannels = 0,
+        string? transformName = null,
+        int? headHiddenSize = null)
     {
+        var transform = BuildTransform(transformName, inChannels);
         var (backbone, backboneOutCh) = BuildBackbone(backboneName, inChannels);
         var (neck, neckOutCh) = BuildNeck(neckName, backboneOutCh, hiddenSize, neckEncoderType);
-        var head = BuildHead(headName, neckOutCh, numClasses, hiddenSize, maxLen, gtcHeadName, gtcOutChannels);
-        return new RecModel(backbone, neck, head, backboneName, neckName, headName);
+        var effectiveHeadHidden = headHiddenSize ?? hiddenSize;
+        var head = BuildHead(headName, neckOutCh, numClasses, effectiveHeadHidden, maxLen, gtcHeadName, gtcOutChannels);
+        return new RecModel(transform, backbone, neck, head, transformName, backboneName, neckName, headName);
     }
 
     private static (Module<Tensor, Tensor>, int) BuildMobileNetV1Enhance(int inChannels)
@@ -252,24 +256,30 @@ public static class RecModelBuilder
 /// </summary>
 public sealed class RecModel : Module<Tensor, Tensor>
 {
+    private readonly Module<Tensor, Tensor>? _transform;
     private readonly Module<Tensor, Tensor> _backbone;
     private readonly Module<Tensor, Tensor> _neck;
     private readonly Module<Tensor, Tensor> _head;
+    public string? TransformName { get; }
     public string BackboneName { get; }
     public string NeckName { get; }
     public string HeadName { get; }
 
     public RecModel(
+        Module<Tensor, Tensor>? transform,
         Module<Tensor, Tensor> backbone,
         Module<Tensor, Tensor> neck,
         Module<Tensor, Tensor> head,
+        string? transformName,
         string backboneName,
         string neckName,
         string headName) : base(nameof(RecModel))
     {
+        _transform = transform;
         _backbone = backbone;
         _neck = neck;
         _head = head;
+        TransformName = transformName;
         BackboneName = backboneName;
         NeckName = neckName;
         HeadName = headName;
@@ -278,6 +288,14 @@ public sealed class RecModel : Module<Tensor, Tensor>
 
     public override Tensor forward(Tensor input)
     {
+        if (_transform is not null)
+        {
+            using var transformed = _transform.call(input);
+            using var featFromTransform = _backbone.call(transformed);
+            using var seqFromTransform = _neck.call(featFromTransform);
+            return _head.call(seqFromTransform);
+        }
+
         using var feat = _backbone.call(input);
         using var seq = _neck.call(feat);
         return _head.call(seq);
@@ -288,6 +306,20 @@ public sealed class RecModel : Module<Tensor, Tensor>
     /// </summary>
     public Dictionary<string, Tensor> ForwardDict(Tensor input, Dictionary<string, Tensor>? targets = null)
     {
+        if (_transform is not null)
+        {
+            using var transformed = _transform.call(input);
+            using var featFromTransform = _backbone.call(transformed);
+            using var seqFromTransform = _neck.call(featFromTransform);
+            if (_head is IRecHead recHeadFromTransform)
+            {
+                return recHeadFromTransform.Forward(seqFromTransform, targets);
+            }
+
+            var logitsFromTransform = _head.call(seqFromTransform);
+            return new Dictionary<string, Tensor> { ["predict"] = logitsFromTransform };
+        }
+
         using var feat = _backbone.call(input);
         using var seq = _neck.call(feat);
         if (_head is IRecHead recHead)

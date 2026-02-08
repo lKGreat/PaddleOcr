@@ -93,6 +93,7 @@ public sealed class STN_ON : Module<Tensor, Tensor>
 
         private void InitStn()
         {
+            using var noGrad = torch.no_grad();
             var margin = 0.01f;
             var samplingNumPerSide = _numCtrlPoints / 2;
             var ctrlPts = new float[_numCtrlPoints * 2];
