@@ -2,6 +2,11 @@ using System.Runtime.InteropServices;
 
 namespace PaddleOcr.Inference.Paddle;
 
+public sealed record PaddlePredictorOptions(
+    bool UseGpu = false,
+    int GpuDeviceId = 0,
+    int GpuMemMb = 1024);
+
 public sealed class PaddleNative : IDisposable
 {
     private static readonly object DllSearchLock = new();
@@ -25,11 +30,14 @@ public sealed class PaddleNative : IDisposable
         return new PaddleNative(library, api);
     }
 
-    public PaddlePredictor CreatePredictor(string modelDirOrFile, string? modelParamsFile = null)
+    public PaddlePredictor CreatePredictor(
+        string modelDirOrFile,
+        string? modelParamsFile = null,
+        PaddlePredictorOptions? options = null)
     {
         EnsureNotDisposed();
         var (graphPath, paramsPath) = ResolveModelArtifacts(modelDirOrFile, modelParamsFile);
-        return new PaddlePredictor(_api, graphPath, paramsPath);
+        return new PaddlePredictor(_api, graphPath, paramsPath, options);
     }
 
     private static IntPtr LoadLibrary(string? paddleLibDir)
@@ -304,7 +312,7 @@ public sealed class PaddleNative : IDisposable
         private readonly string[] _outputNames;
         private bool _disposed;
 
-        internal PaddlePredictor(Api api, string graphPath, string paramsPath)
+        internal PaddlePredictor(Api api, string graphPath, string paramsPath, PaddlePredictorOptions? options)
         {
             _api = api;
             var config = _api.ConfigCreate();
@@ -316,7 +324,24 @@ public sealed class PaddleNative : IDisposable
             try
             {
                 _api.ConfigSetModel(config, graphPath, paramsPath);
-                _api.ConfigDisableGpu(config);
+                var useGpu = options?.UseGpu ?? false;
+                if (useGpu)
+                {
+                    if (_api.ConfigEnableUseGpu is null)
+                    {
+                        throw new InvalidOperationException(
+                            "Paddle runtime does not export PD_ConfigEnableUseGpu; cannot enable teacher GPU inference with current paddle library.");
+                    }
+
+                    var gpuMemMb = Math.Clamp(options?.GpuMemMb ?? 1024, 64, 32768);
+                    var gpuDeviceId = Math.Max(0, options?.GpuDeviceId ?? 0);
+                    _api.ConfigEnableUseGpu(config, (ulong)gpuMemMb, gpuDeviceId);
+                }
+                else
+                {
+                    _api.ConfigDisableGpu(config);
+                }
+
                 _predictor = _api.PredictorCreate(config);
             }
             finally
@@ -524,6 +549,7 @@ public sealed class PaddleNative : IDisposable
         public required ConfigDestroyDelegate ConfigDestroy { get; init; }
         public required ConfigSetModelDelegate ConfigSetModel { get; init; }
         public required ConfigDisableGpuDelegate ConfigDisableGpu { get; init; }
+        public ConfigEnableUseGpuDelegate? ConfigEnableUseGpu { get; init; }
         public required PredictorCreateDelegate PredictorCreate { get; init; }
         public required PredictorDestroyDelegate PredictorDestroy { get; init; }
         public required PredictorGetInputNamesDelegate PredictorGetInputNames { get; init; }
@@ -547,6 +573,7 @@ public sealed class PaddleNative : IDisposable
                 ConfigDestroy = GetDelegate<ConfigDestroyDelegate>(library, "PD_ConfigDestroy"),
                 ConfigSetModel = GetDelegate<ConfigSetModelDelegate>(library, "PD_ConfigSetModel"),
                 ConfigDisableGpu = GetDelegate<ConfigDisableGpuDelegate>(library, "PD_ConfigDisableGpu"),
+                ConfigEnableUseGpu = TryGetDelegate<ConfigEnableUseGpuDelegate>(library, "PD_ConfigEnableUseGpu"),
                 PredictorCreate = GetDelegate<PredictorCreateDelegate>(library, "PD_PredictorCreate"),
                 PredictorDestroy = GetDelegate<PredictorDestroyDelegate>(library, "PD_PredictorDestroy"),
                 PredictorGetInputNames = GetDelegate<PredictorGetInputNamesDelegate>(library, "PD_PredictorGetInputNames"),
@@ -574,6 +601,16 @@ public sealed class PaddleNative : IDisposable
             return Marshal.GetDelegateForFunctionPointer<T>(ptr);
         }
 
+        private static T? TryGetDelegate<T>(IntPtr library, string symbol) where T : Delegate
+        {
+            if (!NativeLibrary.TryGetExport(library, symbol, out var ptr))
+            {
+                return null;
+            }
+
+            return Marshal.GetDelegateForFunctionPointer<T>(ptr);
+        }
+
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         internal delegate IntPtr ConfigCreateDelegate();
 
@@ -588,6 +625,9 @@ public sealed class PaddleNative : IDisposable
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         internal delegate void ConfigDisableGpuDelegate(IntPtr config);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        internal delegate void ConfigEnableUseGpuDelegate(IntPtr config, ulong memoryPoolInitSizeMb, int deviceId);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         internal delegate IntPtr PredictorCreateDelegate(IntPtr config);

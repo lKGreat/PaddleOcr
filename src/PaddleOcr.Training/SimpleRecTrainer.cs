@@ -490,8 +490,9 @@ internal sealed class RecTeacherDistiller : IDisposable
             throw new FileNotFoundException($"Teacher model directory not found: {teacherPath}");
         }
 
+        var backend = cfg.TeacherBackend;
         var torchTeacherPath = ResolveTorchTeacherCheckpoint(teacherPath);
-        if (!string.IsNullOrWhiteSpace(torchTeacherPath))
+        if (backend is "torch" or "auto" && !string.IsNullOrWhiteSpace(torchTeacherPath))
         {
             return CreateTorchTeacher(
                 torchTeacherPath!,
@@ -501,6 +502,26 @@ internal sealed class RecTeacherDistiller : IDisposable
                 studentTimeSteps,
                 studentNumClasses,
                 cfg.StrictTeacherStudent);
+        }
+
+        if (backend == "onnx")
+        {
+            var onnxPath = ResolveOnnxTeacherPath(cfg, teacherPath);
+            var msg = string.IsNullOrWhiteSpace(onnxPath)
+                ? "teacher_backend=onnx but teacher onnx model path is missing (set Global.teacher_onnx_model_path or put model.onnx in teacher dir)."
+                : $"teacher_backend=onnx is configured with model '{onnxPath}', but ONNX teacher distillation backend is not implemented yet.";
+            if (cfg.StrictTeacherStudent)
+            {
+                throw new NotSupportedException(msg);
+            }
+
+            logger.LogWarning("{Message} distillation disabled because strict_teacher_student=false", msg);
+            return null;
+        }
+
+        if (backend != "paddle" && backend != "auto")
+        {
+            throw new InvalidOperationException($"Unsupported teacher backend '{backend}'. Expected paddle|torch|onnx|auto.");
         }
 
         if (!Directory.Exists(teacherPath))
@@ -523,7 +544,12 @@ internal sealed class RecTeacherDistiller : IDisposable
         try
         {
             native = PaddleNative.Create(cfg.TeacherPaddleLibDir);
-            predictor = native.CreatePredictor(teacherPath);
+            predictor = native.CreatePredictor(
+                teacherPath,
+                options: new PaddlePredictorOptions(
+                    UseGpu: cfg.TeacherUseGpu,
+                    GpuDeviceId: cfg.TeacherGpuDeviceId,
+                    GpuMemMb: cfg.TeacherGpuMemMb));
 
             var dryInput = new float[3 * imageH * imageW];
             var dry = predictor.Run(dryInput, [1, 3, imageH, imageW], 1f);
@@ -553,12 +579,29 @@ internal sealed class RecTeacherDistiller : IDisposable
             }
 
             logger.LogInformation(
-                "teacher loaded: dir={Dir}, logits=[T:{T}, C:{C}]",
+                "teacher loaded: backend=paddle, dir={Dir}, logits=[T:{T}, C:{C}], gpu={UseGpu}, gpu_id={GpuId}",
                 cfg.TeacherModelDir,
                 teacherTime,
-                teacherClasses);
+                teacherClasses,
+                cfg.TeacherUseGpu,
+                cfg.TeacherGpuDeviceId);
 
             return new RecTeacherDistiller(native, predictor, teacherTime, teacherClasses, imageH, imageW);
+        }
+        catch (Exception ex) when (IsPaddleInteropFailure(ex))
+        {
+            var msg =
+                $"failed to initialize paddle teacher backend from '{teacherPath}': {ex.Message}. " +
+                "Ensure paddle_inference C API library (PD_* symbols) is available, or switch Global.teacher_backend=torch.";
+            if (cfg.StrictTeacherStudent)
+            {
+                throw new InvalidOperationException(msg, ex);
+            }
+
+            logger.LogWarning("{Message} distillation disabled because strict_teacher_student=false", msg);
+            predictor?.Dispose();
+            native?.Dispose();
+            return null;
         }
         catch
         {
@@ -638,6 +681,34 @@ internal sealed class RecTeacherDistiller : IDisposable
         }
 
         return null;
+    }
+
+    private static string? ResolveOnnxTeacherPath(TrainingConfigView cfg, string teacherPath)
+    {
+        if (!string.IsNullOrWhiteSpace(cfg.TeacherOnnxModelPath) && File.Exists(cfg.TeacherOnnxModelPath))
+        {
+            return cfg.TeacherOnnxModelPath;
+        }
+
+        if (!Directory.Exists(teacherPath))
+        {
+            return null;
+        }
+
+        var direct = Path.Combine(teacherPath, "model.onnx");
+        if (File.Exists(direct))
+        {
+            return direct;
+        }
+
+        return Directory
+            .EnumerateFiles(teacherPath, "*.onnx", SearchOption.TopDirectoryOnly)
+            .FirstOrDefault();
+    }
+
+    private static bool IsPaddleInteropFailure(Exception ex)
+    {
+        return ex is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException;
     }
 
     private static RecTeacherDistiller? CreateTorchTeacher(

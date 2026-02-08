@@ -70,6 +70,32 @@ public sealed class TrainingConfigViewTests
         GetString(cfg, "TrainDelimiter").Should().Be(",");
     }
 
+    [Fact]
+    public void TeacherBackend_Should_Parse_And_Default()
+    {
+        var def = CreateConfig(new Dictionary<string, object?>());
+        GetString(def, "TeacherBackend").Should().Be("paddle");
+        GetBool(def, "TeacherUseGpu").Should().BeTrue();
+        GetInt(def, "TeacherGpuDeviceId").Should().Be(0);
+        GetInt(def, "TeacherGpuMemMb").Should().Be(1024);
+    }
+
+    [Fact]
+    public void CharsetCoverageThreshold_Should_Parse()
+    {
+        var cfg = CreateConfig(new Dictionary<string, object?>
+        {
+            ["Global"] = new Dictionary<string, object?>
+            {
+                ["charset_coverage_fail_fast"] = false,
+                ["charset_max_unknown_ratio"] = 0.2
+            }
+        });
+
+        GetBool(cfg, "CharsetCoverageFailFast").Should().BeFalse();
+        GetFloat(cfg, "CharsetMaxUnknownRatio").Should().BeApproximately(0.2f, 1e-6f);
+    }
+
     private static object CreateConfig(Dictionary<string, object?> overrides)
     {
         var root = new Dictionary<string, object?>(StringComparer.Ordinal)
@@ -148,5 +174,15 @@ public sealed class TrainingConfigViewTests
             IEnumerable<float> seq => seq.ToArray(),
             _ => []
         };
+    }
+
+    private static int GetInt(object cfg, string propertyName)
+    {
+        return (int)(cfg.GetType().GetProperty(propertyName)!.GetValue(cfg) ?? 0);
+    }
+
+    private static float GetFloat(object cfg, string propertyName)
+    {
+        return (float)(cfg.GetType().GetProperty(propertyName)!.GetValue(cfg) ?? 0f);
     }
 }

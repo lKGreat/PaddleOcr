@@ -41,11 +41,18 @@ internal sealed class TrainingConfigView
     public string? PretrainedModel => ResolvePathOrNull(GetStringOrNull("Global.pretrained_model"));
     public string? TeacherModelDir => ResolvePathOrNull(GetStringOrNull("Global.teacher_model_dir"));
     public string? TeacherPaddleLibDir => ResolvePathOrNull(GetStringOrNull("Global.teacher_paddle_lib_dir"));
+    public string? TeacherOnnxModelPath => ResolvePathOrNull(GetStringOrNull("Global.teacher_onnx_model_path"));
+    public string TeacherBackend => ResolveTeacherBackend();
+    public bool TeacherUseGpu => GetBool("Global.teacher_use_gpu", true);
+    public int TeacherGpuDeviceId => Math.Max(0, GetInt("Global.teacher_gpu_device_id", 0));
+    public int TeacherGpuMemMb => Math.Max(64, GetInt("Global.teacher_gpu_mem_mb", 1024));
     public float DistillWeight => Clamp(GetFloat("Global.distill_weight", 0f), 0f, 1f);
     public float DistillTemperature => Math.Max(1e-3f, GetFloat("Global.distill_temperature", 1f));
     public bool StrictTeacherStudent => GetBool("Global.strict_teacher_student", true);
     public string CtcInputLengthMode => ResolveCtcInputLengthMode();
     public bool UseValidRatioForCtcInputLength => CtcInputLengthMode == "valid_ratio";
+    public bool CharsetCoverageFailFast => GetBool("Global.charset_coverage_fail_fast", true);
+    public float CharsetMaxUnknownRatio => Clamp(GetFloat("Global.charset_max_unknown_ratio", 0.05f), 0f, 1f);
 
     public string TrainLabelFile => ResolvePath(GetFirstString("Train.dataset.label_file_list"));
     public string EvalLabelFile => ResolvePath(GetFirstString("Eval.dataset.label_file_list"));
@@ -314,6 +321,19 @@ internal sealed class TrainingConfigView
             "valid_ratio" => "valid_ratio",
             "full" => "full",
             _ => "full"
+        };
+    }
+
+    private string ResolveTeacherBackend()
+    {
+        var raw = (GetStringOrNull("Global.teacher_backend") ?? "paddle").Trim().ToLowerInvariant();
+        return raw switch
+        {
+            "paddle" => "paddle",
+            "torch" => "torch",
+            "onnx" => "onnx",
+            "auto" => "auto",
+            _ => "paddle"
         };
     }
 

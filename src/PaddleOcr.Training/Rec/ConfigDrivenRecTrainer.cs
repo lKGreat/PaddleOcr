@@ -31,7 +31,7 @@ internal sealed class ConfigDrivenRecTrainer
         var (charToId, _) = SimpleRecDataset.LoadDictionary(cfg.RecCharDictPath, cfg.UseSpaceChar);
         var trainLabelFiles = GetLabelFilesOrFallback(cfg.TrainLabelFiles, cfg.TrainLabelFile);
         var evalLabelFiles = GetLabelFilesOrFallback(cfg.EvalLabelFiles, cfg.EvalLabelFile);
-        EnsureCharsetCoverage(trainLabelFiles, evalLabelFiles, charToId, _logger);
+        EnsureCharsetCoverage(cfg, trainLabelFiles, evalLabelFiles, charToId, _logger);
 
         var gtcEncodeType = ResolveGtcEncodeType(cfg);
         var ctcEncoder = new CTCLabelEncode(cfg.MaxTextLength, cfg.RecCharDictPath, cfg.UseSpaceChar);
@@ -149,7 +149,6 @@ internal sealed class ConfigDrivenRecTrainer
                 using var x = torch.tensor(batchData.Images, dtype: ScalarType.Float32).reshape(batchData.Batch, 3, batchData.Height, batchData.Width).to(dev);
                 using var yCtc = torch.tensor(batchData.LabelCtc, dtype: ScalarType.Int64).reshape(batchData.Batch, cfg.MaxTextLength).to(dev);
                 using var yGtc = torch.tensor(batchData.LabelGtc, dtype: ScalarType.Int64).reshape(batchData.Batch, cfg.MaxTextLength).to(dev);
-                using var targetLengths = torch.tensor(batchData.Lengths.Select(x => (long)x).ToArray(), dtype: ScalarType.Int64).to(dev);
                 using var validRatio = torch.tensor(batchData.ValidRatios, dtype: ScalarType.Float32).to(dev);
 
                 using var autocast = ampHelper?.Autocast();
@@ -166,20 +165,18 @@ internal sealed class ConfigDrivenRecTrainer
                 var ctcLogits = predictions.TryGetValue("ctc", out var ctcValue)
                     ? ctcValue
                     : (predictions.TryGetValue("predict", out var predValue) ? predValue : predictions.Values.First());
-                var ctcTime = ctcLogits.shape.Length >= 2 ? ctcLogits.shape[1] : cfg.MaxTextLength;
-                var inputLengthArr = new long[batchData.Batch];
-                for (var i = 0; i < batchData.Batch; i++)
-                {
-                    var len = ctcTime;
-                    if (cfg.UseValidRatioForCtcInputLength)
-                    {
-                        var ratio = i < batchData.ValidRatios.Length ? batchData.ValidRatios[i] : 1f;
-                        len = (long)Math.Round(ctcTime * Math.Clamp(ratio, 0f, 1f));
-                    }
-
-                    inputLengthArr[i] = Math.Clamp(len, 1, ctcTime);
-                }
-                using var inputLengths = torch.tensor(inputLengthArr, dtype: ScalarType.Int64, device: dev);
+                var ctcTime = ctcLogits.shape.Length >= 2
+                    ? (int)Math.Clamp(ctcLogits.shape[1], 1, int.MaxValue)
+                    : cfg.MaxTextLength;
+                var ctcLens = CtcLengthSanitizer.Sanitize(
+                    batchData.Lengths,
+                    batchData.ValidRatios,
+                    batchData.LabelCtc,
+                    ctcTime,
+                    cfg.MaxTextLength,
+                    cfg.UseValidRatioForCtcInputLength);
+                using var targetLengths = torch.tensor(ctcLens.TargetLengths, dtype: ScalarType.Int64, device: dev);
+                using var inputLengths = torch.tensor(ctcLens.InputLengths, dtype: ScalarType.Int64, device: dev);
 
                 var lossDict = lossFn.Forward(
                     predictions,
@@ -241,7 +238,22 @@ internal sealed class ConfigDrivenRecTrainer
                 var lossVal = effectiveLoss.ToSingle();
                 if (float.IsNaN(lossVal) || float.IsInfinity(lossVal))
                 {
-                    _logger.LogWarning("NaN/Inf loss detected at step {Step}, skipping this batch", globalStep);
+                    var nanReason =
+                        $"ctc_time={ctcTime}, truncated_by_time={ctcLens.TruncatedByTime}, truncated_by_input={ctcLens.TruncatedByInput}, " +
+                        $"truncated_by_repeat={ctcLens.TruncatedByRepeatConstraint}, empty_targets={ctcLens.EmptyTargets}";
+                    _logger.LogWarning("NaN/Inf loss detected at step {Step}, skipping this batch. {Reason}", globalStep, nanReason);
+                    AppendJsonLine(
+                        tracePath,
+                        new
+                        {
+                            event_type = "nan_skip",
+                            epoch,
+                            global_step = globalStep,
+                            reason = nanReason,
+                            batch = batchData.Batch,
+                            height = batchData.Height,
+                            width = batchData.Width
+                        });
                     globalStep++;
                     mixedLoss?.Dispose();
                     kdLoss?.Dispose();
@@ -324,6 +336,11 @@ internal sealed class ConfigDrivenRecTrainer
                             width = batchData.Width,
                             ctc_time_steps = ctcTime,
                             target_len_mean = meanTargetLen,
+                            effective_batch = batchData.Batch - ctcLens.EmptyTargets,
+                            ctc_truncated_by_time = ctcLens.TruncatedByTime,
+                            ctc_truncated_by_input = ctcLens.TruncatedByInput,
+                            ctc_truncated_by_repeat = ctcLens.TruncatedByRepeatConstraint,
+                            ctc_empty_targets = ctcLens.EmptyTargets,
                             step_ms = stepMs,
                             ctc_blank_ratio = blankRatio,
                             optimizer_step_count = optimizerStepCount,
@@ -1018,9 +1035,18 @@ internal sealed class ConfigDrivenRecTrainer
         return (float)Math.Sqrt(sum);
     }
 
-    private static void EnsureCharsetCoverage(IReadOnlyList<string> trainLabelFiles, IReadOnlyList<string> evalLabelFiles, IReadOnlyDictionary<char, int> charToId, ILogger logger)
+    private static void EnsureCharsetCoverage(
+        TrainingConfigView cfg,
+        IReadOnlyList<string> trainLabelFiles,
+        IReadOnlyList<string> evalLabelFiles,
+        IReadOnlyDictionary<char, int> charToId,
+        ILogger logger)
     {
         var missing = new HashSet<char>();
+        var totalChars = 0L;
+        var unknownChars = 0L;
+        var totalSamples = 0L;
+        var parsedSamples = 0L;
         foreach (var labelFile in trainLabelFiles.Concat(evalLabelFiles))
         {
             if (!File.Exists(labelFile))
@@ -1035,25 +1061,45 @@ internal sealed class ConfigDrivenRecTrainer
                     continue;
                 }
 
+                totalSamples++;
                 if (!RecLabelLineParser.TryParse(line, out _, out var text))
                 {
                     continue;
                 }
 
+                parsedSamples++;
                 foreach (var ch in text)
                 {
+                    totalChars++;
                     if (!charToId.ContainsKey(ch))
                     {
+                        unknownChars++;
                         missing.Add(ch);
                     }
                 }
             }
         }
 
+        var unknownRatio = totalChars == 0 ? 0f : (float)unknownChars / totalChars;
+        logger.LogInformation(
+            "rec charset audit: parsed_samples={Parsed}/{Total}, total_chars={Chars}, unknown_chars={Unknown}, unknown_ratio={Ratio:F4}",
+            parsedSamples,
+            totalSamples,
+            totalChars,
+            unknownChars,
+            unknownRatio);
+
         if (missing.Count > 0)
         {
             var preview = new string(missing.Take(32).ToArray());
             logger.LogWarning("rec charset missing {Count} chars from labels. example: {Chars}", missing.Count, preview);
+        }
+
+        if (cfg.CharsetCoverageFailFast && unknownRatio > cfg.CharsetMaxUnknownRatio)
+        {
+            throw new InvalidOperationException(
+                $"rec charset coverage check failed: unknown_ratio={unknownRatio:F4} exceeds threshold={cfg.CharsetMaxUnknownRatio:F4}. " +
+                "Use matching character_dict_path or disable Global.charset_coverage_fail_fast.");
         }
     }
 
