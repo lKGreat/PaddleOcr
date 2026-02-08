@@ -80,13 +80,14 @@ public static class RecModelBuilder
         int hiddenSize = 48,
         int maxLen = 25,
         string? gtcHeadName = null,
-        int gtcOutChannels = 0)
+        int gtcOutChannels = 0,
+        int gtcInChannels = 0)
     {
         return name.ToLowerInvariant() switch
         {
             "ctc" or "ctchead" => new CTCHead(inChannels, outChannels),
             "attn" or "attention" or "attentionhead" => new AttentionHead(inChannels, outChannels, hiddenSize, maxLen),
-            "multi" or "multihead" => new MultiHead(inChannels, outChannels, gtcOutChannels, hiddenSize, maxLen, gtcHeadName),
+            "multi" or "multihead" => new MultiHead(inChannels, outChannels, gtcOutChannels, hiddenSize, maxLen, gtcHeadName, gtcInChannels <= 0 ? inChannels : gtcInChannels),
             "sar" or "sarhead" => new SARHead(inChannels, outChannels, hiddenSize, maxLen),
             "nrtr" or "nrtrhead" => new NRTRHead(inChannels, outChannels, hiddenSize, maxLen: maxLen),
             "srn" or "srnhead" => new SRNHead(inChannels, outChannels, hiddenSize, maxLen),
@@ -128,7 +129,7 @@ public static class RecModelBuilder
         var (backbone, backboneOutCh) = BuildBackbone(backboneName, inChannels);
         var (neck, neckOutCh) = BuildNeck(neckName, backboneOutCh, hiddenSize, neckEncoderType);
         var effectiveHeadHidden = headHiddenSize ?? hiddenSize;
-        var head = BuildHead(headName, neckOutCh, numClasses, effectiveHeadHidden, maxLen, gtcHeadName, gtcOutChannels);
+        var head = BuildHead(headName, neckOutCh, numClasses, effectiveHeadHidden, maxLen, gtcHeadName, gtcOutChannels, backboneOutCh);
         return new RecModel(transform, backbone, neck, head, transformName, backboneName, neckName, headName);
     }
 
@@ -306,6 +307,25 @@ public sealed class RecModel : Module<Tensor, Tensor>
     /// </summary>
     public Dictionary<string, Tensor> ForwardDict(Tensor input, Dictionary<string, Tensor>? targets = null)
     {
+        static Dictionary<string, Tensor>? BuildHeadTargets(Dictionary<string, Tensor>? src, Tensor backboneFeat, Tensor neckFeat)
+        {
+            if (src is null)
+            {
+                return new Dictionary<string, Tensor>
+                {
+                    ["backbone_feat"] = backboneFeat,
+                    ["neck_feat"] = neckFeat
+                };
+            }
+
+            var merged = new Dictionary<string, Tensor>(src)
+            {
+                ["backbone_feat"] = backboneFeat,
+                ["neck_feat"] = neckFeat
+            };
+            return merged;
+        }
+
         if (_transform is not null)
         {
             var transformed = _transform.call(input);
@@ -313,7 +333,8 @@ public sealed class RecModel : Module<Tensor, Tensor>
             var seqFromTransform = _neck.call(featFromTransform);
             if (_head is IRecHead recHeadFromTransform)
             {
-                return recHeadFromTransform.Forward(seqFromTransform, targets);
+                var headTargets = BuildHeadTargets(targets, featFromTransform, seqFromTransform);
+                return recHeadFromTransform.Forward(seqFromTransform, headTargets);
             }
 
             var logitsFromTransform = _head.call(seqFromTransform);
@@ -324,7 +345,8 @@ public sealed class RecModel : Module<Tensor, Tensor>
         var seq = _neck.call(feat);
         if (_head is IRecHead recHead)
         {
-            return recHead.Forward(seq, targets);
+            var headTargets = BuildHeadTargets(targets, feat, seq);
+            return recHead.Forward(seq, headTargets);
         }
 
         var logits = _head.call(seq);

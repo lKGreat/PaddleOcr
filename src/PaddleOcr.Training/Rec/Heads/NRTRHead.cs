@@ -5,21 +5,23 @@ using static TorchSharp.torch.nn;
 namespace PaddleOcr.Training.Rec.Heads;
 
 /// <summary>
-/// NRTRHead：Encoder-Decoder Transformer + 位置编码。
-/// 用于 NRTR 算法。
+/// NRTR head with Transformer encoder/decoder.
+/// Training mode supports token input from label_gtc for decoder teacher forcing.
 /// </summary>
 public sealed class NRTRHead : Module<Tensor, Tensor>, IRecHead
 {
     private readonly TransformerEncoder _encoder;
     private readonly TransformerDecoder _decoder;
     private readonly Module<Tensor, Tensor> _outputProj;
-    private readonly int _outChannels;
-    private readonly int _maxLen;
 
-    public NRTRHead(int inChannels, int outChannels, int hiddenSize = 512, int numHeads = 8, int numLayers = 3, int maxLen = 25) : base(nameof(NRTRHead))
+    public NRTRHead(
+        int inChannels,
+        int outChannels,
+        int hiddenSize = 512,
+        int numHeads = 8,
+        int numLayers = 3,
+        int maxLen = 25) : base(nameof(NRTRHead))
     {
-        _outChannels = outChannels;
-        _maxLen = maxLen;
         _encoder = new TransformerEncoder(inChannels, hiddenSize, numHeads, numLayers);
         _decoder = new TransformerDecoder(hiddenSize, outChannels, numHeads, numLayers, maxLen);
         _outputProj = Linear(hiddenSize, outChannels);
@@ -28,37 +30,42 @@ public sealed class NRTRHead : Module<Tensor, Tensor>, IRecHead
 
     public override Tensor forward(Tensor input)
     {
-        // input: [B, W, C]
-        var encoded = _encoder.call(input); // [B, W, hiddenSize]
-        var decoded = _decoder.Forward(encoded); // [B, maxLen, hiddenSize]
-        return _outputProj.call(decoded); // [B, maxLen, outChannels]
+        return ForwardInternal(input, targetTokens: null);
     }
 
     public Dictionary<string, Tensor> Forward(Tensor input, Dictionary<string, Tensor>? targets = null)
     {
-        var logits = forward(input);
+        Tensor? targetTokens = null;
+        if (training && targets is not null)
+        {
+            if (!targets.TryGetValue("label_gtc", out targetTokens))
+            {
+                targets.TryGetValue("label", out targetTokens);
+            }
+        }
+
+        var logits = ForwardInternal(input, targetTokens);
         return new Dictionary<string, Tensor> { ["predict"] = logits };
+    }
+
+    private Tensor ForwardInternal(Tensor input, Tensor? targetTokens)
+    {
+        var encoded = _encoder.call(input);                     // [B, S, H]
+        var decoded = _decoder.Forward(encoded, targetTokens); // [B, T, H]
+        return _outputProj.call(decoded);                       // [B, T, C]
     }
 }
 
-/// <summary>
-/// TransformerEncoder：Transformer 编码器。
-/// </summary>
 internal sealed class TransformerEncoder : Module<Tensor, Tensor>
 {
     private readonly Module<Tensor, Tensor> _posEmbed;
     private readonly Module<Tensor, Tensor>? _inputProj;
     private readonly TorchSharp.Modules.ModuleList<Module<Tensor, Tensor>> _layers;
-    private readonly int _hiddenSize;
 
     public TransformerEncoder(int inChannels, int hiddenSize, int numHeads, int numLayers) : base(nameof(TransformerEncoder))
     {
-        _hiddenSize = hiddenSize;
-        _posEmbed = Embedding(256, hiddenSize); // 最大序列长度 256
-
-        // 在构造函数中预创建投影层（如果 inChannels != hiddenSize）
+        _posEmbed = Embedding(256, hiddenSize);
         _inputProj = inChannels != hiddenSize ? Linear(inChannels, hiddenSize) : null;
-
         _layers = new TorchSharp.Modules.ModuleList<Module<Tensor, Tensor>>();
         for (var i = 0; i < numLayers; i++)
         {
@@ -70,27 +77,21 @@ internal sealed class TransformerEncoder : Module<Tensor, Tensor>
 
     public override Tensor forward(Tensor input)
     {
-        // input: [B, W, C]
-        var shape = input.shape;
-        var b = shape[0];
-        var w = shape[1];
-
-        // 如果 inChannels != hiddenSize，使用预注册的投影层
+        // input: [B, S, C]
+        var b = input.shape[0];
+        var s = input.shape[1];
         var x = _inputProj is not null ? _inputProj.call(input) : input;
 
-        // 添加位置编码
-        var posLen = Math.Min(w, 256);
+        var posLen = Math.Min(s, 256);
         var posIds = arange(posLen, ScalarType.Int64, device: input.device).unsqueeze(0).expand(b, -1);
         using var posEmb = _posEmbed.call(posIds);
-
-        // 如果序列长度超过位置编码范围，只对前部分加位置编码
-        if (w <= 256)
+        if (s <= 256)
         {
             x = x + posEmb;
         }
         else
         {
-            using var posEmbPadded = functional.pad(posEmb, new long[] { 0, 0, 0, w - 256 });
+            using var posEmbPadded = functional.pad(posEmb, new long[] { 0, 0, 0, s - 256 });
             x = x + posEmbPadded;
         }
 
@@ -103,26 +104,20 @@ internal sealed class TransformerEncoder : Module<Tensor, Tensor>
     }
 }
 
-/// <summary>
-/// TransformerEncoderLayer：Transformer 编码层（Pre-Norm 结构）。
-/// </summary>
 internal sealed class TransformerEncoderLayer : Module<Tensor, Tensor>
 {
     private readonly MultiHeadSelfAttention _selfAttn;
     private readonly Module<Tensor, Tensor> _ffn;
     private readonly Module<Tensor, Tensor> _norm1;
     private readonly Module<Tensor, Tensor> _norm2;
-    public int HiddenSize { get; }
 
     public TransformerEncoderLayer(int hiddenSize, int numHeads) : base(nameof(TransformerEncoderLayer))
     {
-        HiddenSize = hiddenSize;
         _selfAttn = new MultiHeadSelfAttention(hiddenSize, numHeads);
         _ffn = Sequential(
             Linear(hiddenSize, hiddenSize * 4),
             GELU(),
-            Linear(hiddenSize * 4, hiddenSize)
-        );
+            Linear(hiddenSize * 4, hiddenSize));
         _norm1 = LayerNorm(hiddenSize);
         _norm2 = LayerNorm(hiddenSize);
         RegisterComponents();
@@ -130,7 +125,6 @@ internal sealed class TransformerEncoderLayer : Module<Tensor, Tensor>
 
     public override Tensor forward(Tensor input)
     {
-        // Pre-Norm: norm -> attn -> residual
         var normed = _norm1.call(input);
         var attnOut = _selfAttn.call(normed);
         var x = input + attnOut;
@@ -141,9 +135,6 @@ internal sealed class TransformerEncoderLayer : Module<Tensor, Tensor>
     }
 }
 
-/// <summary>
-/// MultiHeadSelfAttention：多头自注意力模块（Q/K/V 来自同一输入）。
-/// </summary>
 internal sealed class MultiHeadSelfAttention : Module<Tensor, Tensor>
 {
     private readonly Module<Tensor, Tensor> _qkvProj;
@@ -162,31 +153,25 @@ internal sealed class MultiHeadSelfAttention : Module<Tensor, Tensor>
 
     public override Tensor forward(Tensor input)
     {
-        // input: [B, seqLen, hiddenSize]
-        var shape = input.shape;
-        var b = shape[0];
-        var seqLen = shape[1];
+        var b = input.shape[0];
+        var s = input.shape[1];
         var dim = _numHeads * _headDim;
 
         var qkv = _qkvProj.call(input);
         var chunks = qkv.chunk(3, dim: -1);
-        var q = chunks[0].reshape(b, seqLen, _numHeads, _headDim).permute(0, 2, 1, 3);
-        var k = chunks[1].reshape(b, seqLen, _numHeads, _headDim).permute(0, 2, 1, 3);
-        var v = chunks[2].reshape(b, seqLen, _numHeads, _headDim).permute(0, 2, 1, 3);
+        var q = chunks[0].reshape(b, s, _numHeads, _headDim).permute(0, 2, 1, 3);
+        var k = chunks[1].reshape(b, s, _numHeads, _headDim).permute(0, 2, 1, 3);
+        var v = chunks[2].reshape(b, s, _numHeads, _headDim).permute(0, 2, 1, 3);
 
         var scale = Math.Sqrt(_headDim);
-        // [B, numHeads, seqLen, headDim] x [B, numHeads, headDim, seqLen] -> [B, numHeads, seqLen, seqLen]
         using var scores = torch.matmul(q, k.transpose(-2, -1)) / scale;
         using var attn = functional.softmax(scores, dim: -1);
-        var output = torch.matmul(attn, v); // [B, numHeads, seqLen, headDim]
-        output = output.permute(0, 2, 1, 3).reshape(b, seqLen, dim);
+        var output = torch.matmul(attn, v);
+        output = output.permute(0, 2, 1, 3).reshape(b, s, dim);
         return _outProj.call(output);
     }
 }
 
-/// <summary>
-/// MultiHeadCrossAttention：多头交叉注意力模块（Q 来自 decoder，K/V 来自 encoder）。
-/// </summary>
 internal sealed class MultiHeadCrossAttention : Module<Tensor, Tensor>
 {
     private readonly Module<Tensor, Tensor> _qProj;
@@ -194,7 +179,6 @@ internal sealed class MultiHeadCrossAttention : Module<Tensor, Tensor>
     private readonly Module<Tensor, Tensor> _outProj;
     private readonly int _numHeads;
     private readonly int _headDim;
-    private Tensor? _encoderOutput;
 
     public MultiHeadCrossAttention(int hiddenSize, int numHeads) : base(nameof(MultiHeadCrossAttention))
     {
@@ -206,48 +190,33 @@ internal sealed class MultiHeadCrossAttention : Module<Tensor, Tensor>
         RegisterComponents();
     }
 
-    /// <summary>
-    /// 设置编码器输出（用于提供 K/V）。
-    /// </summary>
-    public void SetEncoderOutput(Tensor encoderOutput)
+    public Tensor Forward(Tensor decoderInput, Tensor encoderOutput)
     {
-        _encoderOutput = encoderOutput;
-    }
-
-    public override Tensor forward(Tensor decoderInput)
-    {
-        if (_encoderOutput is null)
-        {
-            throw new InvalidOperationException("Encoder output must be set before cross-attention forward");
-        }
-
         var b = decoderInput.shape[0];
         var tgtLen = decoderInput.shape[1];
-        var srcLen = _encoderOutput.shape[1];
+        var srcLen = encoderOutput.shape[1];
         var dim = _numHeads * _headDim;
 
-        // Q 来自 decoder input
         var q = _qProj.call(decoderInput).reshape(b, tgtLen, _numHeads, _headDim).permute(0, 2, 1, 3);
-
-        // K, V 来自 encoder output
-        var kv = _kvProj.call(_encoderOutput);
+        var kv = _kvProj.call(encoderOutput);
         var kvChunks = kv.chunk(2, dim: -1);
         var k = kvChunks[0].reshape(b, srcLen, _numHeads, _headDim).permute(0, 2, 1, 3);
         var v = kvChunks[1].reshape(b, srcLen, _numHeads, _headDim).permute(0, 2, 1, 3);
 
         var scale = Math.Sqrt(_headDim);
-        // [B, numHeads, tgtLen, headDim] x [B, numHeads, headDim, srcLen] -> [B, numHeads, tgtLen, srcLen]
         using var scores = torch.matmul(q, k.transpose(-2, -1)) / scale;
         using var attn = functional.softmax(scores, dim: -1);
-        var output = torch.matmul(attn, v); // [B, numHeads, tgtLen, headDim]
+        var output = torch.matmul(attn, v);
         output = output.permute(0, 2, 1, 3).reshape(b, tgtLen, dim);
         return _outProj.call(output);
     }
+
+    public override Tensor forward(Tensor input)
+    {
+        throw new InvalidOperationException("Use Forward(decoderInput, encoderOutput) instead.");
+    }
 }
 
-/// <summary>
-/// TransformerDecoder：Transformer 解码器。
-/// </summary>
 internal sealed class TransformerDecoder : Module<Tensor, Tensor>
 {
     private readonly Module<Tensor, Tensor> _embedding;
@@ -269,19 +238,26 @@ internal sealed class TransformerDecoder : Module<Tensor, Tensor>
         RegisterComponents();
     }
 
-    /// <summary>
-    /// 解码器前向传播（接受 encoderOutput 作为参数，避免手动 Set 状态）。
-    /// </summary>
-    public Tensor Forward(Tensor encoderOutput)
+    public Tensor Forward(Tensor encoderOutput, Tensor? targetTokens = null)
     {
         var b = encoderOutput.shape[0];
         var device = encoderOutput.device;
 
-        // 创建解码器输入（SOS tokens）
-        var sosIds = zeros(new long[] { b, _maxLen }, ScalarType.Int64, device: device);
-        var x = _embedding.call(sosIds);
+        var tokenIds = zeros(new long[] { b, _maxLen }, ScalarType.Int64, device: device);
+        if (targetTokens is not null && targetTokens.shape.Length == 2)
+        {
+            using var target64 = targetTokens.to_type(ScalarType.Int64).to(device);
+            if (target64.shape[0] == b)
+            {
+                var copyLen = Math.Min((int)target64.shape[1], _maxLen);
+                if (copyLen > 0)
+                {
+                    tokenIds.narrow(1, 0, copyLen).copy_(target64.narrow(1, 0, copyLen));
+                }
+            }
+        }
 
-        // 添加位置编码
+        var x = _embedding.call(tokenIds);
         var posIds = arange(_maxLen, ScalarType.Int64, device: device).unsqueeze(0).expand(b, -1);
         using var posEmb = _posEmbed.call(posIds);
         x = x + posEmb;
@@ -294,12 +270,9 @@ internal sealed class TransformerDecoder : Module<Tensor, Tensor>
         return x;
     }
 
-    public override Tensor forward(Tensor encoderOutput) => Forward(encoderOutput);
+    public override Tensor forward(Tensor encoderOutput) => Forward(encoderOutput, targetTokens: null);
 }
 
-/// <summary>
-/// TransformerDecoderLayer：Transformer 解码层（Pre-Norm 结构，标准 Cross-Attention）。
-/// </summary>
 internal sealed class TransformerDecoderLayer : Module<Tensor, Tensor>
 {
     private readonly MultiHeadSelfAttention _selfAttn;
@@ -316,36 +289,30 @@ internal sealed class TransformerDecoderLayer : Module<Tensor, Tensor>
         _ffn = Sequential(
             Linear(hiddenSize, hiddenSize * 4),
             GELU(),
-            Linear(hiddenSize * 4, hiddenSize)
-        );
+            Linear(hiddenSize * 4, hiddenSize));
         _norm1 = LayerNorm(hiddenSize);
         _norm2 = LayerNorm(hiddenSize);
         _norm3 = LayerNorm(hiddenSize);
         RegisterComponents();
     }
 
-    /// <summary>
-    /// 解码层前向传播（通过参数传递 encoderOutput，而非 Set 方法）。
-    /// </summary>
     public Tensor Forward(Tensor input, Tensor encoderOutput)
     {
-        // Self-attention
         var normed = _norm1.call(input);
         var selfAttnOut = _selfAttn.call(normed);
         var x = input + selfAttnOut;
 
-        // Cross-attention（Q 来自 decoder，K/V 来自 encoder）
         normed = _norm2.call(x);
-        _crossAttn.SetEncoderOutput(encoderOutput);
-        var crossAttnOut = _crossAttn.call(normed);
+        var crossAttnOut = _crossAttn.Forward(normed, encoderOutput);
         x = x + crossAttnOut;
 
-        // FFN
         normed = _norm3.call(x);
         var ffnOut = _ffn.call(normed);
         return x + ffnOut;
     }
 
-    public override Tensor forward(Tensor input) =>
-        throw new InvalidOperationException("Use Forward(input, encoderOutput) instead");
+    public override Tensor forward(Tensor input)
+    {
+        throw new InvalidOperationException("Use Forward(input, encoderOutput) instead.");
+    }
 }

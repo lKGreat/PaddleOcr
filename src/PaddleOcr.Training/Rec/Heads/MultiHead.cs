@@ -6,12 +6,14 @@ namespace PaddleOcr.Training.Rec.Heads;
 
 /// <summary>
 /// Multi-head rec head: CTC + optional GTC branch (NRTR/SAR/Attention).
+/// GTC branch prefers backbone feature when provided in targets["backbone_feat"].
 /// </summary>
 public sealed class MultiHead : Module<Tensor, Tensor>, IRecHead
 {
     private readonly CTCHead _ctcHead;
     private readonly Module<Tensor, Tensor>? _gtcHeadModule;
     private readonly IRecHead? _gtcHead;
+    private readonly int _gtcInChannels;
 
     public MultiHead(
         int inChannels,
@@ -19,13 +21,15 @@ public sealed class MultiHead : Module<Tensor, Tensor>, IRecHead
         int outChannelsGtc = 0,
         int hiddenSize = 48,
         int maxLen = 25,
-        string? gtcHeadName = null)
+        string? gtcHeadName = null,
+        int gtcInChannels = 0)
         : base(nameof(MultiHead))
     {
+        _gtcInChannels = gtcInChannels > 0 ? gtcInChannels : inChannels;
         _ctcHead = new CTCHead(inChannels, outChannelsCtc);
         if (outChannelsGtc > 0)
         {
-            _gtcHeadModule = BuildGtcHead(gtcHeadName, inChannels, outChannelsGtc, hiddenSize, maxLen);
+            _gtcHeadModule = BuildGtcHead(gtcHeadName, _gtcInChannels, outChannelsGtc, hiddenSize, maxLen);
             _gtcHead = _gtcHeadModule as IRecHead;
         }
 
@@ -45,12 +49,43 @@ public sealed class MultiHead : Module<Tensor, Tensor>, IRecHead
 
         if (_gtcHead is not null)
         {
-            var gtcOut = _gtcHead.Forward(input, targets);
+            var gtcInput = PrepareGtcInput(input, targets, _gtcInChannels);
+            var gtcOut = _gtcHead.Forward(gtcInput, targets);
             result["gtc"] = gtcOut["predict"];
         }
 
         result["predict"] = result["ctc"];
         return result;
+    }
+
+    private static Tensor PrepareGtcInput(Tensor headInput, Dictionary<string, Tensor>? targets, int expectedChannels)
+    {
+        var source = headInput;
+        if (targets is not null && targets.TryGetValue("backbone_feat", out var backboneFeat))
+        {
+            source = backboneFeat;
+        }
+
+        if (source.shape.Length == 4)
+        {
+            // [B,C,H,W] -> [B,H*W,C]
+            source = source.flatten(2).transpose(1, 2);
+        }
+
+        if (source.shape.Length != 3)
+        {
+            throw new InvalidOperationException($"MultiHead GTC branch expects rank-3/4 feature, but got rank-{source.shape.Length}");
+        }
+
+        if (source.shape[2] != expectedChannels)
+        {
+            // Keep strict to surface config mismatch early.
+            throw new InvalidOperationException(
+                $"MultiHead GTC feature channel mismatch: expected C={expectedChannels}, got C={source.shape[2]}. " +
+                "Check backbone/head_list configuration.");
+        }
+
+        return source;
     }
 
     private static Module<Tensor, Tensor> BuildGtcHead(
