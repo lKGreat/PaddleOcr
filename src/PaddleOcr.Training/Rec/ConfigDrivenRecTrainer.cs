@@ -37,6 +37,7 @@ internal sealed class ConfigDrivenRecTrainer
         var ctcEncoder = new CTCLabelEncode(cfg.MaxTextLength, cfg.RecCharDictPath, cfg.UseSpaceChar);
         var gtcEncoder = CreateGtcEncoder(gtcEncodeType, cfg);
         var resizeStrategy = RecTrainingResizeFactory.Create(cfg.GetArchitectureString("algorithm", "SVTR_LCNet"));
+        var concatOptions = RecConcatAugmentOptions.FromConfig(cfg, shape.H, shape.W);
 
         var trainSet = new ConfigRecDataset(
             trainLabelFiles,
@@ -53,7 +54,8 @@ internal sealed class ConfigDrivenRecTrainer
             multiScaleHeights: cfg.MultiScaleHeights,
             delimiter: cfg.TrainDelimiter,
             ratioList: cfg.TrainRatioList,
-            seed: cfg.Seed);
+            seed: cfg.Seed,
+            concatOptions: concatOptions);
 
         var evalSet = new ConfigRecDataset(
             evalLabelFiles,
@@ -67,7 +69,8 @@ internal sealed class ConfigDrivenRecTrainer
             enableAugmentation: false,
             useMultiScale: false,
             delimiter: cfg.EvalDelimiter,
-            seed: cfg.Seed + 17);
+            seed: cfg.Seed + 17,
+            concatOptions: RecConcatAugmentOptions.Disabled);
 
         var runtime = TrainingDeviceResolver.Resolve(cfg);
         var dev = runtime.Device;

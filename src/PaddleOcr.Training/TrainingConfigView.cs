@@ -492,9 +492,77 @@ internal sealed class TrainingConfigView
         return GetString(path, fallback);
     }
 
+    public float GetConfigFloat(string path, float fallback)
+    {
+        return GetFloat(path, fallback);
+    }
+
     public object? GetByPathPublic(string path)
     {
         return GetByPath(path);
+    }
+
+    /// <summary>
+    /// Locate a transform config block by name under Train.dataset.transforms.
+    /// Returns the raw dictionary if found; otherwise null.
+    /// </summary>
+    public Dictionary<string, object?>? GetTransformConfig(string opName)
+    {
+        if (GetByPath("Train.dataset.transforms") is not List<object?> transforms)
+        {
+            return null;
+        }
+
+        foreach (var item in transforms)
+        {
+            if (item is not Dictionary<string, object?> op)
+            {
+                continue;
+            }
+
+            if (op.TryGetValue(opName, out var cfgObj) && cfgObj is Dictionary<string, object?> cfg)
+            {
+                return cfg;
+            }
+        }
+
+        return null;
+    }
+
+    public float GetTransformFloat(string opName, string field, float fallback)
+    {
+        var cfg = GetTransformConfig(opName);
+        if (cfg is null)
+        {
+            return fallback;
+        }
+
+        if (cfg.TryGetValue(field, out var val) && float.TryParse(
+                val?.ToString(),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var parsed))
+        {
+            return parsed;
+        }
+
+        return fallback;
+    }
+
+    public int GetTransformInt(string opName, string field, int fallback)
+    {
+        var cfg = GetTransformConfig(opName);
+        if (cfg is null)
+        {
+            return fallback;
+        }
+
+        if (cfg.TryGetValue(field, out var val) && int.TryParse(val?.ToString(), out var parsed))
+        {
+            return parsed;
+        }
+
+        return fallback;
     }
 
     private (int Start, int Interval) ParseEvalBatchStep()

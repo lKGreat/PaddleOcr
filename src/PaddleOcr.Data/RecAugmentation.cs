@@ -1,6 +1,8 @@
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
+using SixLabors.ImageSharp.Processing.Processors.Transforms;
+using System.Numerics;
 
 namespace PaddleOcr.Data;
 
@@ -140,9 +142,15 @@ public static class RecAugmentation
     /// 应用组合增强（对应官方 RecAug / BaseDataAugmentation）。
     /// 参考: ppocr/data/imaug/rec_img_aug.py
     /// </summary>
-    public static Image<Rgb24> ApplyAugmentation(Image<Rgb24> image, bool enableRotate = true, bool enableNoise = true, bool enableBlur = true, bool enableBrightness = true, bool enableContrast = true)
+    public static Image<Rgb24> ApplyAugmentation(Image<Rgb24> image, bool enableRotate = true, bool enableNoise = true, bool enableBlur = true, bool enableBrightness = true, bool enableContrast = true, bool enableTia = true)
     {
         var rng = Random.Shared;
+
+        // TIA 变形（近似）：随机小角度旋转 + X/Y 斜切，模拟透视/拉伸
+        if (enableTia && rng.NextSingle() <= 0.4f)
+        {
+            image = ApplyTiaLikeDistort(image);
+        }
 
         // 随机裁剪
         if (rng.NextSingle() > 0.5f)
@@ -192,6 +200,21 @@ public static class RecAugmentation
             image = Reverse(image);
         }
 
+        return image;
+    }
+
+    private static Image<Rgb24> ApplyTiaLikeDistort(Image<Rgb24> image, float maxSkewDeg = 8f, float maxRotateDeg = 6f)
+    {
+        var rng = Random.Shared;
+        var skewX = (rng.NextSingle() * 2 - 1) * maxSkewDeg;
+        var skewY = (rng.NextSingle() * 2 - 1) * maxSkewDeg;
+        var rotate = (rng.NextSingle() * 2 - 1) * maxRotateDeg;
+
+        var builder = new ProjectiveTransformBuilder();
+        builder.AppendSkewDegrees(skewX, skewY, new PointF(0, 0));
+        builder.AppendRotationDegrees(rotate);
+
+        image.Mutate(ctx => ctx.Transform(builder));
         return image;
     }
 }

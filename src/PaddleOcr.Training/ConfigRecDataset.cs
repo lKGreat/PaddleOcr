@@ -2,6 +2,7 @@ using PaddleOcr.Data;
 using PaddleOcr.Data.LabelEncoders;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
 
 namespace PaddleOcr.Training;
 
@@ -18,6 +19,7 @@ internal sealed class ConfigRecDataset
     private readonly IRecLabelEncoder? _gtcEncoder;
     private readonly IRecTrainingResize _resizer;
     private readonly bool _enableAugmentation;
+    private readonly RecConcatAugmentOptions _concatOptions;
 
     public ConfigRecDataset(
         IReadOnlyList<string> labelFiles,
@@ -34,7 +36,8 @@ internal sealed class ConfigRecDataset
         int[]? multiScaleHeights = null,
         string? delimiter = null,
         IReadOnlyList<float>? ratioList = null,
-        int seed = 1024)
+        int seed = 1024,
+        RecConcatAugmentOptions? concatOptions = null)
     {
         _targetH = targetH;
         _targetW = targetW;
@@ -43,6 +46,7 @@ internal sealed class ConfigRecDataset
         _gtcEncoder = gtcEncoder;
         _resizer = resizer ?? new RecResizeImg();
         _enableAugmentation = enableAugmentation;
+        _concatOptions = concatOptions ?? RecConcatAugmentOptions.Disabled;
         _useMultiScale = useMultiScale;
         _multiScaleWidths = (multiScaleWidths is { Length: > 0 } ? multiScaleWidths : [targetW])
             .Where(w => w > 0)
@@ -105,18 +109,22 @@ internal sealed class ConfigRecDataset
                     continue;
                 }
 
-                using var img = Image.Load<Rgb24>(sample.ImagePath);
+                using var baseImg = Image.Load<Rgb24>(sample.ImagePath);
+                var (augImg, augText) = MaybeConcatAugment(baseImg, sample.Text, rng);
                 if (_enableAugmentation)
                 {
-                    RecAugmentation.ApplyAugmentation(img);
+                    RecAugmentation.ApplyAugmentation(augImg);
                 }
 
-                var resized = _resizer.Resize(img, 3, batchH, batchW);
+                var resized = _resizer.Resize(augImg, 3, batchH, batchW);
                 imageList.Add(resized.Data);
-                ctcLabels.Add(FitLabel(encodedCtc.Label, _maxTextLength));
-                gtcLabels.Add(FitLabel(encodedGtc.Label, _maxTextLength));
-                lengths.Add(Math.Min(_maxTextLength, encodedCtc.Length));
+                var finalCtc = _ctcEncoder.Encode(augText) ?? encodedCtc;
+                var finalGtc = _gtcEncoder?.Encode(augText) ?? encodedGtc;
+                ctcLabels.Add(FitLabel(finalCtc.Label, _maxTextLength));
+                gtcLabels.Add(FitLabel(finalGtc.Label, _maxTextLength));
+                lengths.Add(Math.Min(_maxTextLength, finalCtc.Length));
                 validRatios.Add(resized.ValidRatio);
+                augImg.Dispose();
             }
 
             if (imageList.Count == 0)
@@ -146,6 +154,48 @@ internal sealed class ConfigRecDataset
                 batchH,
                 batchW);
         }
+    }
+
+    private (Image<Rgb24> Image, string Text) MaybeConcatAugment(Image<Rgb24> image, string text, Random rng)
+    {
+        if (!_concatOptions.Enabled || rng.NextDouble() > _concatOptions.Prob)
+        {
+            return (image.Clone(), text);
+        }
+
+        var current = image.Clone();
+        var currentText = text;
+
+        for (var i = 0; i < _concatOptions.ExtDataNum; i++)
+        {
+            var extSample = _samples[rng.Next(_samples.Count)];
+            if (currentText.Length + extSample.Text.Length > _maxTextLength)
+            {
+                break;
+            }
+
+            using var extImg = Image.Load<Rgb24>(extSample.ImagePath);
+            var concatRatio = (current.Width / (float)current.Height) + (extImg.Width / (float)extImg.Height);
+            if (concatRatio > _concatOptions.MaxWhRatio)
+            {
+                continue;
+            }
+
+            var newWidth = current.Width + extImg.Width;
+            var newHeight = Math.Max(current.Height, extImg.Height);
+            var canvas = new Image<Rgb24>(newWidth, newHeight);
+            canvas.Mutate(ctx =>
+            {
+                ctx.DrawImage(current, new Point(0, 0), 1f);
+                ctx.DrawImage(extImg, new Point(current.Width, 0), 1f);
+            });
+
+            current.Dispose();
+            current = canvas;
+            currentText += extSample.Text;
+        }
+
+        return (current, currentText);
     }
 
     private static long[] FitLabel(long[] label, int targetLen)
