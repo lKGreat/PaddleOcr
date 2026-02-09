@@ -315,7 +315,12 @@ internal sealed class LearnableRepLayer : Module<Tensor, Tensor>
         if (_isRepped && _reparamConv is not null)
         {
             var outRepped = _lab.call(_reparamConv.call(input));
-            if (_strideH != 2 && _strideW != 2)
+            // Python: `if self.stride != 2` — only skips act when stride is exactly
+            // the scalar 2 (meaning both H and W are 2). Asymmetric strides like
+            // (2,1) are NOT equal to 2, so act IS applied. This matches det mode
+            // where stride=2 means (2,2) and rec mode where strides are always
+            // tuples like (2,1) or (1,2).
+            if (!(_strideH == 2 && _strideW == 2))
             {
                 outRepped = _act.call(outRepped);
             }
@@ -344,7 +349,8 @@ internal sealed class LearnableRepLayer : Module<Tensor, Tensor>
 
         // sum should never be null because _convKxk always has at least 1 element
         var result = _lab.call(sum!);
-        if (_strideH != 2 && _strideW != 2)
+        // See comment in repped branch above for rationale.
+        if (!(_strideH == 2 && _strideW == 2))
         {
             result = _act.call(result);
         }

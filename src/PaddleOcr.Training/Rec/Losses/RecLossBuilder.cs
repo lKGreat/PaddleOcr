@@ -53,6 +53,8 @@ public static class RecLossBuilder
 
         IRecLoss ctcLoss = new CTCLoss();
         IRecLoss? gtcLoss = null;
+        // Python: predicts["sar"] for SARLoss, predicts["gtc"] for NRTRLoss
+        var gtcPredKey = "gtc";
 
         if (TryGetList(config, "loss_config_list", out var lossConfigList))
         {
@@ -73,6 +75,15 @@ public static class RecLossBuilder
                 else
                 {
                     gtcLoss = built;
+                    // Determine prediction key based on loss type
+                    if (kv.Key.Contains("SAR", StringComparison.OrdinalIgnoreCase))
+                    {
+                        gtcPredKey = "sar";
+                    }
+                    else
+                    {
+                        gtcPredKey = "gtc";
+                    }
                 }
             }
         }
@@ -88,7 +99,8 @@ public static class RecLossBuilder
             ctcWeight: ctcWeight,
             gtcWeight: gtcWeight,
             ctcLabelKey: "label_ctc",
-            gtcLabelKey: "label_gtc");
+            gtcLabelKey: "label_gtc",
+            gtcPredKey: gtcPredKey);
     }
 
     private static bool IsCtcLoss(string lossName)

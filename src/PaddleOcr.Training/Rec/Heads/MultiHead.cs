@@ -25,18 +25,23 @@ public record MultiHeadCtcNeckConfig(
 
 /// <summary>
 /// Multi-head rec head: CTC + optional GTC branch (NRTR/SAR/Attention).
-/// CTC branch can optionally have an internal SequenceEncoder (e.g., SVTR).
-/// GTC branch uses FCTranspose for channel projection, then head.
+/// 1:1 port of ppocr/modeling/heads/rec_multi_head.py MultiHead.
+///
+/// CTC branch: optional internal SequenceEncoder (e.g., SVTR) -> CTCHead.
+/// GTC branch: FCTranspose (Flatten+transpose+Linear) -> optional AddPos -> head.
+///
+/// In eval mode, only the CTC branch is executed (matching Python behavior).
 /// </summary>
 public sealed class MultiHead : Module<Tensor, Tensor>, IRecHead
 {
     private readonly SequenceEncoder? _ctcEncoder;
     private readonly CTCHead _ctcHead;
-    private readonly Module<Tensor, Tensor>? _beforeGtc;  // FCTranspose
+    private readonly Module<Tensor, Tensor>? _beforeGtc;  // Sequential: Flatten(2) + FCTranspose + optional AddPos
     private readonly Module<Tensor, Tensor>? _gtcHeadModule;
     private readonly IRecHead? _gtcHead;
     private readonly int _gtcInChannels;
     private readonly int _nrtrDim;
+    private readonly string _gtcType; // "sar" or "nrtr"
 
     /// <summary>
     /// Legacy constructor (backward compatible, no internal CTC encoder).
@@ -65,11 +70,15 @@ public sealed class MultiHead : Module<Tensor, Tensor>, IRecHead
         string? gtcHeadName = null,
         int gtcInChannels = 0,
         MultiHeadCtcNeckConfig? ctcNeckConfig = null,
-        int nrtrDim = 0)
+        int nrtrDim = 0,
+        bool usePool = false,
+        bool usePos = false,
+        int numDecoderLayers = 4)
         : base(nameof(MultiHead))
     {
         _gtcInChannels = gtcInChannels > 0 ? gtcInChannels : inChannels;
         _nrtrDim = nrtrDim;
+        _gtcType = "sar"; // default
 
         // CTC branch: optionally with internal encoder
         if (ctcNeckConfig is not null)
@@ -98,13 +107,58 @@ public sealed class MultiHead : Module<Tensor, Tensor>, IRecHead
         // GTC branch: with optional FCTranspose
         if (outChannelsGtc > 0)
         {
-            if (nrtrDim > 0)
-            {
-                _beforeGtc = BuildFCTranspose(inChannels, nrtrDim);
-            }
+            var normalizedGtcName = (gtcHeadName ?? string.Empty).ToLowerInvariant();
 
-            _gtcHeadModule = BuildGtcHead(gtcHeadName, nrtrDim > 0 ? nrtrDim : _gtcInChannels, outChannelsGtc, hiddenSize, maxLen);
-            _gtcHead = _gtcHeadModule as IRecHead;
+            if (normalizedGtcName.Contains("nrtr"))
+            {
+                _gtcType = "nrtr";
+                var effectiveNrtrDim = nrtrDim > 0 ? nrtrDim : 256;
+
+                // Python: self.before_gtc = Sequential(Flatten(2), FCTranspose(in_channels, nrtr_dim), [AddPos])
+                if (usePos)
+                {
+                    _beforeGtc = Sequential(
+                        new Flatten2D(),
+                        new FCTranspose(inChannels, effectiveNrtrDim),
+                        new AddPos(effectiveNrtrDim, 80));
+                }
+                else
+                {
+                    _beforeGtc = Sequential(
+                        new Flatten2D(),
+                        new FCTranspose(inChannels, effectiveNrtrDim));
+                }
+
+                // Python: self.gtc_head = Transformer(
+                //     d_model=nrtr_dim, nhead=nrtr_dim//32,
+                //     num_encoder_layers=-1, num_decoder_layers=num_decoder_layers,
+                //     max_len=max_text_length, dim_feedforward=nrtr_dim*4,
+                //     out_channels=out_channels_list["NRTRLabelDecode"])
+                var nrtrHeads = effectiveNrtrDim / 32;
+                if (nrtrHeads < 1) nrtrHeads = 1;
+
+                _gtcHeadModule = new NRTRHead(
+                    inChannels: effectiveNrtrDim,
+                    outChannels: outChannelsGtc,
+                    hiddenSize: effectiveNrtrDim,
+                    numHeads: nrtrHeads,
+                    numEncoderLayers: 0, // No encoder when used inside MultiHead
+                    numDecoderLayers: numDecoderLayers,
+                    maxLen: maxLen);
+                _gtcHead = _gtcHeadModule as IRecHead;
+            }
+            else if (normalizedGtcName.Contains("sar"))
+            {
+                _gtcType = "sar";
+                _gtcHeadModule = BuildGtcHead(gtcHeadName, _gtcInChannels, outChannelsGtc, hiddenSize, maxLen);
+                _gtcHead = _gtcHeadModule as IRecHead;
+            }
+            else
+            {
+                // Fallback: attention head
+                _gtcHeadModule = BuildGtcHead(gtcHeadName, nrtrDim > 0 ? nrtrDim : _gtcInChannels, outChannelsGtc, hiddenSize, maxLen);
+                _gtcHead = _gtcHeadModule as IRecHead;
+            }
         }
 
         RegisterComponents();
@@ -121,46 +175,42 @@ public sealed class MultiHead : Module<Tensor, Tensor>, IRecHead
         var result = new Dictionary<string, Tensor>();
 
         // CTC branch: encoder (optional) -> head
-        var ctcInput = _ctcEncoder is not null ? _ctcEncoder.call(input) : input;
-        var ctcOut = _ctcHead.Forward(ctcInput, targets);
+        var ctcEncoder = _ctcEncoder is not null ? _ctcEncoder.call(input) : input;
+        var ctcOut = _ctcHead.Forward(ctcEncoder, targets);
         result["ctc"] = ctcOut["predict"];
+        result["ctc_neck"] = ctcEncoder; // Python: head_out["ctc_neck"] = ctc_encoder
 
-        // GTC branch: FCTranspose (optional) -> head
+        // Python: eval mode returns only CTC output
+        if (!training)
+        {
+            result["predict"] = result["ctc"];
+            return result;
+        }
+
+        // GTC branch: before_gtc -> head (training only)
+        // Python: both CTC and GTC branches use x (head input) directly
         if (_gtcHead is not null)
         {
-            var gtcFeat = input;
-            if (targets is not null && targets.TryGetValue("backbone_feat", out var backboneFeat))
-            {
-                gtcFeat = backboneFeat;
-            }
+            Tensor gtcInput;
 
-            var gtcInput = gtcFeat;
             if (_beforeGtc is not null)
             {
-                // Apply FCTranspose
-                gtcInput = _beforeGtc.call(gtcFeat);
+                // NRTR path: self.before_gtc(x) — transforms head input
+                gtcInput = _beforeGtc.call(input);
             }
             else
             {
-                // Legacy: prepare as before
-                gtcInput = PrepareGtcInput(gtcFeat, _gtcInChannels);
+                // SAR/other path: use head input directly
+                gtcInput = PrepareGtcInput(input, _gtcInChannels);
             }
 
             var gtcOut = _gtcHead.Forward(gtcInput, targets);
-            result["gtc"] = gtcOut["predict"];
+            var gtcKey = _gtcType == "sar" ? "sar" : "gtc";
+            result[gtcKey] = gtcOut["predict"];
         }
 
         result["predict"] = result["ctc"];
         return result;
-    }
-
-    /// <summary>
-    /// Build FCTranspose: Flatten(2) + Linear projection + Transpose.
-    /// Input: [B, C, H, W] -> Output: [B, seq_len, nrtrDim]
-    /// </summary>
-    private static Module<Tensor, Tensor> BuildFCTranspose(int inChannels, int nrtrDim)
-    {
-        return new FCTranspose(inChannels, nrtrDim);
     }
 
     private static Tensor PrepareGtcInput(Tensor source, int expectedChannels)
@@ -197,7 +247,6 @@ public sealed class MultiHead : Module<Tensor, Tensor>, IRecHead
         var normalized = (gtcHeadName ?? string.Empty).ToLowerInvariant();
         return normalized switch
         {
-            "nrtr" or "nrtrhead" => new NRTRHead(inChannels, outChannels, hiddenSize, maxLen: maxLen),
             "sar" or "sarhead" => new SARHead(inChannels, outChannels, hiddenSize, maxLen),
             "attn" or "attention" or "attentionhead" => new AttentionHead(inChannels, outChannels, hiddenSize, maxLen),
             _ => new AttentionHead(inChannels, outChannels, hiddenSize, maxLen)
@@ -206,9 +255,9 @@ public sealed class MultiHead : Module<Tensor, Tensor>, IRecHead
 }
 
 /// <summary>
-/// FCTranspose: Flatten(2) + Linear projection + optional Transpose.
-/// Used in MultiHead GTC branch to project backbone features to nrtrDim.
-/// Input: [B, C, H, W] -> Output: [B, seq_len, nrtrDim]
+/// FCTranspose: Transpose + Linear (no bias).
+/// Python: rec_multi_head.py FCTranspose
+/// Input: [B, C, S] -> transpose -> [B, S, C] -> Linear -> [B, S, outChannels]
 /// </summary>
 internal sealed class FCTranspose : Module<Tensor, Tensor>
 {
@@ -216,33 +265,54 @@ internal sealed class FCTranspose : Module<Tensor, Tensor>
 
     public FCTranspose(int inChannels, int outChannels) : base(nameof(FCTranspose))
     {
-        _linear = Linear(inChannels, outChannels);
+        // Python: nn.Linear(in_channels, out_channels, bias_attr=False)
+        _linear = Linear(inChannels, outChannels, hasBias: false);
         RegisterComponents();
     }
 
     public override Tensor forward(Tensor input)
     {
-        // Input: [B, C, H, W]
-        if (input.shape.Length == 4)
-        {
-            var b = input.shape[0];
-            var c = input.shape[1];
-            var h = input.shape[2];
-            var w = input.shape[3];
-
-            // [B, C, H, W] -> [B, H*W, C]
-            var flattened = input.flatten(2).transpose(1, 2);
-
-            // [B, H*W, C] -> [B, H*W, out]
-            return _linear.call(flattened);
-        }
-
-        if (input.shape.Length == 3)
-        {
-            // Already flattened: [B, seq_len, C] -> [B, seq_len, out]
-            return _linear.call(input);
-        }
-
-        throw new InvalidOperationException($"FCTranspose expects rank-3/4 input, got rank-{input.shape.Length}");
+        // Input from Flatten(2): [B, C, S] -> transpose -> [B, S, C] -> Linear -> [B, S, out]
+        return _linear.call(input.transpose(1, 2));
     }
 }
+
+/// <summary>
+/// Flatten from dim=2: [B, C, H, W] -> [B, C, H*W]
+/// Python: nn.Flatten(2)
+/// </summary>
+internal sealed class Flatten2D : Module<Tensor, Tensor>
+{
+    public Flatten2D() : base(nameof(Flatten2D))
+    {
+    }
+
+    public override Tensor forward(Tensor input)
+    {
+        return input.flatten(2);
+    }
+}
+
+/// <summary>
+/// Learnable positional embedding added to input.
+/// Python: AddPos in rec_multi_head.py
+/// </summary>
+internal sealed class AddPos : Module<Tensor, Tensor>
+{
+    private readonly Tensor _decPosEmbed;
+
+    public AddPos(int dim, int w) : base(nameof(AddPos))
+    {
+        // Python: shape=[1, w, dim], initialized with trunc_normal_
+        _decPosEmbed = Parameter(torch.randn(1, w, dim) * 0.02f);
+        register_parameter("dec_pos_embed", (TorchSharp.Modules.Parameter)_decPosEmbed);
+        RegisterComponents();
+    }
+
+    public override Tensor forward(Tensor input)
+    {
+        var seqLen = (int)input.shape[1];
+        return input + _decPosEmbed[.., ..seqLen, ..];
+    }
+}
+

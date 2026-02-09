@@ -260,6 +260,40 @@ internal sealed class EncoderWithSVTR : Module<Tensor, Tensor>
         _conv1x1 = new ConvBNLayer(inChannels / 8, dims, new[] { 1, 1 });
 
         RegisterComponents();
+
+        // Python: self.apply(self._init_weights)
+        InitWeights();
+    }
+
+    /// <summary>
+    /// Initialize weights matching Python EncoderWithSVTR._init_weights.
+    /// Linear weights: trunc_normal_, bias: zeros.
+    /// LayerNorm: weight=ones, bias=zeros.
+    /// </summary>
+    private void InitWeights()
+    {
+        foreach (var (name, module) in named_modules())
+        {
+            if (module is TorchSharp.Modules.Linear linear)
+            {
+                using (torch.no_grad())
+                {
+                    nn.init.trunc_normal_(linear.weight!, std: 0.02f);
+                    if (linear.bias is not null)
+                    {
+                        nn.init.zeros_(linear.bias);
+                    }
+                }
+            }
+            else if (module is TorchSharp.Modules.LayerNorm layerNorm)
+            {
+                using (torch.no_grad())
+                {
+                    if (layerNorm.bias is not null) nn.init.zeros_(layerNorm.bias);
+                    if (layerNorm.weight is not null) nn.init.ones_(layerNorm.weight);
+                }
+            }
+        }
     }
 
     public override Tensor forward(Tensor input)

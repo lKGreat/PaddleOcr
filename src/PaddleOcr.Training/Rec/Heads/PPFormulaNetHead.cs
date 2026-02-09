@@ -13,7 +13,7 @@ public sealed class PPFormulaNetHead : Module<Tensor, Tensor>, IRecHead
 
     public PPFormulaNetHead(int inChannels, int outChannels, int hiddenSize = 512, int maxLen = 200) : base(nameof(PPFormulaNetHead))
     {
-        _nrtrHead = new NRTRHead(inChannels, outChannels, hiddenSize, numHeads: 8, numLayers: 3, maxLen);
+        _nrtrHead = new NRTRHead(inChannels, outChannels, hiddenSize, numHeads: 8, numEncoderLayers: 3, numDecoderLayers: 3, maxLen: maxLen);
         RegisterComponents();
     }
 

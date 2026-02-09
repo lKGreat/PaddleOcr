@@ -1379,9 +1379,9 @@ internal sealed class ConfigDrivenRecTrainer
                     var idx = predsData[i * timeSteps + t];
                     if (idx != 0 && idx != prevIdx) // skip blank (0) and duplicates
                     {
-                        if (idx - 1 >= 0 && idx - 1 < ctcEncoder.Characters.Count)
+                        if (idx > 0 && idx < ctcEncoder.Characters.Count)
                         {
-                            predChars.Append(ctcEncoder.Characters[(int)(idx - 1)]);
+                            predChars.Append(ctcEncoder.Characters[(int)idx]);
                         }
                     }
                     prevIdx = idx;
@@ -1393,9 +1393,9 @@ internal sealed class ConfigDrivenRecTrainer
                 {
                     var idx = batchData.LabelCtc[i * maxTextLength + t];
                     if (idx == 0) break; // blank/padding
-                    if (idx - 1 >= 0 && idx - 1 < ctcEncoder.Characters.Count)
+                    if (idx > 0 && idx < ctcEncoder.Characters.Count)
                     {
-                        gtChars.Append(ctcEncoder.Characters[(int)(idx - 1)]);
+                        gtChars.Append(ctcEncoder.Characters[(int)idx]);
                     }
                 }
 

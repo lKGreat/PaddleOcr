@@ -13,7 +13,7 @@ public sealed class UniMERNetHead : Module<Tensor, Tensor>, IRecHead
 
     public UniMERNetHead(int inChannels, int outChannels, int hiddenSize = 512, int maxLen = 100) : base(nameof(UniMERNetHead))
     {
-        _nrtrHead = new NRTRHead(inChannels, outChannels, hiddenSize, numHeads: 8, numLayers: 3, maxLen);
+        _nrtrHead = new NRTRHead(inChannels, outChannels, hiddenSize, numHeads: 8, numEncoderLayers: 3, numDecoderLayers: 3, maxLen: maxLen);
         RegisterComponents();
     }
 
