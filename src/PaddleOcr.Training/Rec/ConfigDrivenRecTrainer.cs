@@ -520,6 +520,7 @@ internal sealed class ConfigDrivenRecTrainer
                             eval_acc = stepEval.Accuracy,
                             eval_char_acc = stepEval.CharacterAccuracy,
                             eval_edit = stepEval.AvgEditDistance,
+                            eval_norm_edit_dis = stepEval.NormEditDistance,
                             best_acc = bestAcc
                         });
                     _logger.LogInformation(
@@ -570,13 +571,14 @@ internal sealed class ConfigDrivenRecTrainer
                 ckptManager.SaveFull(cfg.SaveModelDir, $"epoch_{epoch}", model, optimizer, lrScheduler, epoch, globalStep, bestAcc);
             }
             _logger.LogInformation(
-                "epoch={Epoch}/{Total} train_loss={Loss:F4} eval_acc={EvalAcc:F4} eval_char_acc={CharAcc:F4} eval_edit={Edit:F4} lr={Lr:F6}",
+                "epoch={Epoch}/{Total} train_loss={Loss:F4} eval_acc={EvalAcc:F4} eval_char_acc={CharAcc:F4} eval_edit={Edit:F4} norm_edit_dis={NormEdit:F4} lr={Lr:F6}",
                 epoch,
                 cfg.EpochNum,
                 trainLoss,
                 evalMetrics.Accuracy,
                 evalMetrics.CharacterAccuracy,
                 evalMetrics.AvgEditDistance,
+                evalMetrics.NormEditDistance,
                 lrScheduler.CurrentLR);
             AppendJsonLine(
                 epochTracePath,
@@ -588,6 +590,7 @@ internal sealed class ConfigDrivenRecTrainer
                     eval_acc = evalMetrics.Accuracy,
                     eval_char_acc = evalMetrics.CharacterAccuracy,
                     eval_edit = evalMetrics.AvgEditDistance,
+                    eval_norm_edit_dis = evalMetrics.NormEditDistance,
                     lr = lrScheduler.CurrentLR,
                     optimizer_step_count = optimizerStepCount,
                     non_zero_grad_steps = nonZeroGradSteps
@@ -904,6 +907,7 @@ internal sealed class ConfigDrivenRecTrainer
         var charTotal = 0L;
         var charErrors = 0L;
         var editSum = 0L;
+        var normEditSum = 0.0; // Sum of normalized edit distances (matching Python RecMetric)
         using var noGrad = torch.no_grad();
         foreach (var batchData in evalSet.GetBatches(batchSize, shuffle, new Random(7), dropLast: dropLast))
         {
@@ -935,6 +939,13 @@ internal sealed class ConfigDrivenRecTrainer
                 editSum += edit;
                 charErrors += edit;
                 charTotal += gtText.Length;
+
+                // Normalized edit distance matching Python: rapidfuzz.distance.Levenshtein.normalized_distance
+                // = edit_distance / max(len(pred), len(gt))
+                var maxLen = Math.Max(predText.Length, gtText.Length);
+                var normDist = maxLen > 0 ? (double)edit / maxLen : 0.0;
+                normEditSum += normDist;
+
                 total++;
             }
 
@@ -944,7 +955,9 @@ internal sealed class ConfigDrivenRecTrainer
         var acc = total == 0 ? 0f : (float)correct / total;
         var charAcc = charTotal == 0 ? 0f : Math.Clamp(1f - (float)charErrors / charTotal, 0f, 1f);
         var avgEdit = total == 0 ? 0f : (float)editSum / total;
-        return new RecEvalMetrics(acc, charAcc, avgEdit);
+        // norm_edit_dis matching Python: 1 - sum(normalized_distance) / all_num
+        var normEditDis = total == 0 ? 0f : (float)(1.0 - normEditSum / total);
+        return new RecEvalMetrics(acc, charAcc, avgEdit, normEditDis);
     }
 
     private static int Levenshtein(string left, string right)

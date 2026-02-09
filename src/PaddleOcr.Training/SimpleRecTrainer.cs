@@ -455,7 +455,14 @@ internal sealed class SimpleRecTrainer
     }
 }
 
-internal sealed record RecEvalMetrics(float Accuracy, float CharacterAccuracy, float AvgEditDistance);
+/// <summary>
+/// Recognition evaluation metrics.
+/// Accuracy: word-level exact match accuracy (matches Python RecMetric.acc)
+/// CharacterAccuracy: 1 - char_errors/char_total
+/// AvgEditDistance: average raw Levenshtein edit distance
+/// NormEditDistance: 1 - avg(edit_dist/max(len_pred,len_gt)) (matches Python RecMetric.norm_edit_dis)
+/// </summary>
+internal sealed record RecEvalMetrics(float Accuracy, float CharacterAccuracy, float AvgEditDistance, float NormEditDistance = 0f);
 
 internal sealed class RecTeacherDistiller : IDisposable
 {
