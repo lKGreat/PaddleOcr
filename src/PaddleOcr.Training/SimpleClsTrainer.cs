@@ -1,4 +1,5 @@
-﻿using System.Text.Json;
+using System.Diagnostics;
+using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using PaddleOcr.Training.Runtime;
 using TorchSharp;
@@ -25,9 +26,19 @@ internal sealed class SimpleClsTrainer
 
         var runtime = TrainingDeviceResolver.Resolve(cfg);
         var dev = runtime.Device;
-        _logger.LogInformation("Training device: {Device}", dev.type);
+        _logger.LogInformation("Training(cls) device: {Device}", dev.type);
         _logger.LogInformation("runtime: requested={Requested}, cuda={Cuda}, amp={Amp}, reason={Reason}", runtime.RequestedDevice, runtime.UseCuda, runtime.UseAmp, runtime.Reason);
-        _logger.LogInformation("Train samples: {TrainCount}, Eval samples: {EvalCount}", trainSet.Count, evalSet.Count);
+        _logger.LogInformation("Train samples: {TrainCount}, Eval samples: {EvalCount}, Classes: {Classes}", trainSet.Count, evalSet.Count, numClasses);
+
+        Directory.CreateDirectory(cfg.SaveModelDir);
+
+        // Training stats with median smoothing (matching Python PaddleOCR)
+        var trainStats = new TrainingStats(cfg.LogSmoothWindow, ["lr"]);
+        var iterTimer = new IterationTimer(cfg.LogSmoothWindow, cfg.PrintBatchStep);
+        var tracePath = Path.Combine(cfg.SaveModelDir, "cls_train_trace.jsonl");
+        var epochTracePath = Path.Combine(cfg.SaveModelDir, "cls_epoch_summary.jsonl");
+        File.WriteAllText(tracePath, string.Empty);
+        File.WriteAllText(epochTracePath, string.Empty);
 
         using var model = new SimpleClsNet(numClasses);
         model.to(dev);
@@ -39,13 +50,15 @@ internal sealed class SimpleClsTrainer
         }
         var optimizer = torch.optim.Adam(model.parameters(), lr: lr);
 
-        var rng = new Random(1024);
+        var rng = new Random(cfg.Seed);
         float bestAcc = -1f;
         var epochsCompleted = 0;
         var staleEpochs = 0;
         var earlyStopped = false;
+        var globalStep = 0;
         for (var epoch = 1; epoch <= cfg.EpochNum; epoch++)
         {
+            var epochSw = Stopwatch.StartNew();
             if (cfg.LrDecayStep > 0 && epoch > 1 && (epoch - 1) % cfg.LrDecayStep == 0)
             {
                 lr *= cfg.LrDecayGamma;
@@ -58,25 +71,90 @@ internal sealed class SimpleClsTrainer
             var lossSum = 0f;
             var sampleCount = 0;
             var correct = 0L;
+            var batchIdx = 0;
+            var totalBatches = (trainSet.Count + cfg.BatchSize - 1) / cfg.BatchSize;
             foreach (var (images, labels, batch) in trainSet.GetBatches(cfg.BatchSize, shuffle: true, rng))
             {
+                iterTimer.StartReader();
+                iterTimer.EndReader();
+
+                iterTimer.StartBatch();
+
                 using var x = torch.tensor(images, dtype: ScalarType.Float32).reshape(batch, 3, shape.H, shape.W).to(dev);
                 using var y = torch.tensor(labels, dtype: ScalarType.Int64).to(dev);
                 optimizer.zero_grad();
                 using var logits = model.call(x);
                 using var loss = functional.cross_entropy(logits, y);
+                var lossVal = loss.ToSingle();
+
                 loss.backward();
+
+                // Compute gradient norm for diagnostics
+                var gradNorm = EstimateGradNorm(model);
+                if (float.IsNaN(gradNorm) || float.IsInfinity(gradNorm))
+                {
+                    _logger.LogWarning("cls gradient norm is NaN/Inf at step {Step}", globalStep);
+                }
+
                 if (cfg.GradClipNorm > 0f)
                 {
                     torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.GradClipNorm);
                 }
                 optimizer.step();
 
-                lossSum += loss.ToSingle() * batch;
+                lossSum += lossVal * batch;
                 using var pred = logits.argmax(1);
                 using var eq = pred.eq(y);
                 correct += eq.sum().ToInt64();
                 sampleCount += batch;
+                globalStep++;
+
+                iterTimer.EndBatch(batch);
+
+                // Compute batch accuracy
+                var batchAcc = batch == 0 ? 0f : (float)eq.sum().ToInt64() / batch;
+
+                // Update training stats with median smoothing
+                trainStats.Update(new Dictionary<string, float>
+                {
+                    ["loss"] = lossVal,
+                    ["acc"] = batchAcc,
+                    ["lr"] = lr,
+                    ["grad_norm"] = gradNorm
+                });
+
+                // Per-iteration logging (matching Python PaddleOCR format)
+                if (globalStep % cfg.PrintBatchStep == 0 || batchIdx >= totalBatches - 1)
+                {
+                    var eta = iterTimer.GetEta(epoch, cfg.EpochNum, batchIdx, totalBatches);
+                    _logger.LogInformation(
+                        "epoch: [{Epoch}/{Total}], global_step: {Step}, {StatsLog}, avg_reader_cost: {ReaderCost:F5} s, avg_batch_cost: {BatchCost:F5} s, avg_samples: {AvgSamples}, ips: {Ips:F2} samples/s, eta: {Eta}",
+                        epoch, cfg.EpochNum, globalStep,
+                        trainStats.Log(),
+                        iterTimer.AvgReaderCost,
+                        iterTimer.AvgBatchCost,
+                        batch,
+                        iterTimer.AvgBatchCost > 0 ? batch / iterTimer.AvgBatchCost : 0,
+                        eta);
+
+                    // Per-iteration JSONL trace
+                    AppendJsonLine(tracePath, new
+                    {
+                        epoch,
+                        global_step = globalStep,
+                        loss = lossVal,
+                        acc = batchAcc,
+                        lr,
+                        grad_norm = gradNorm,
+                        batch,
+                        avg_reader_cost = iterTimer.AvgReaderCost,
+                        avg_batch_cost = iterTimer.AvgBatchCost,
+                        ips = iterTimer.AvgBatchCost > 0 ? batch / iterTimer.AvgBatchCost : 0,
+                        eta
+                    });
+                }
+
+                batchIdx++;
             }
 
             var trainLoss = sampleCount == 0 ? 0f : lossSum / sampleCount;
@@ -95,7 +173,26 @@ internal sealed class SimpleClsTrainer
             }
 
             SaveCheckpoint(cfg.SaveModelDir, model, "latest.pt");
-            _logger.LogInformation("epoch={Epoch}/{Total} train_loss={Loss:F4} train_acc={TrainAcc:F4} eval_acc={EvalAcc:F4}", epoch, cfg.EpochNum, trainLoss, trainAcc, evalAcc);
+            epochSw.Stop();
+            _logger.LogInformation(
+                "epoch={Epoch}/{Total} train_loss={Loss:F4} train_acc={TrainAcc:F4} eval_acc={EvalAcc:F4} best_acc={BestAcc:F4} lr={Lr:F6} time={Time:F1}s",
+                epoch, cfg.EpochNum, trainLoss, trainAcc, evalAcc, bestAcc, lr, epochSw.Elapsed.TotalSeconds);
+
+            // Epoch summary JSONL
+            AppendJsonLine(epochTracePath, new
+            {
+                event_type = "epoch_end",
+                epoch,
+                global_step = globalStep,
+                train_loss = trainLoss,
+                train_acc = trainAcc,
+                eval_acc = evalAcc,
+                best_acc = bestAcc,
+                lr,
+                epoch_time_ms = epochSw.Elapsed.TotalMilliseconds,
+                stale_epochs = staleEpochs
+            });
+
             epochsCompleted = epoch;
             if (cfg.EarlyStopPatience > 0 && staleEpochs >= cfg.EarlyStopPatience)
             {
@@ -250,6 +347,34 @@ internal sealed class SimpleClsTrainer
         File.WriteAllText(
             Path.Combine(cfg.SaveModelDir, "train_run_summary.json"),
             JsonSerializer.Serialize(run, new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    /// <summary>
+    /// Estimate gradient L2 norm across all parameters.
+    /// </summary>
+    private static float EstimateGradNorm(Module model)
+    {
+        double totalNorm = 0;
+        foreach (var param in model.parameters())
+        {
+            var grad = param.grad;
+            if (grad is not null)
+            {
+                using var gradCpu = grad.cpu().to_type(ScalarType.Float32);
+                var values = gradCpu.data<float>().ToArray();
+                for (var i = 0; i < values.Length; i++)
+                {
+                    var v = values[i];
+                    totalNorm += v * v;
+                }
+            }
+        }
+        return (float)Math.Sqrt(totalNorm);
+    }
+
+    private static void AppendJsonLine(string filePath, object data)
+    {
+        File.AppendAllText(filePath, JsonSerializer.Serialize(data) + Environment.NewLine);
     }
 }
 

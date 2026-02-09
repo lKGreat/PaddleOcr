@@ -153,9 +153,13 @@ internal sealed class ConfigDrivenRecTrainer
         var tracePath = Path.Combine(cfg.SaveModelDir, "train_trace.jsonl");
         var epochTracePath = Path.Combine(cfg.SaveModelDir, "train_epoch_summary.jsonl");
         var recentLoss = new Queue<float>(cfg.LogSmoothWindow);
+        // Training stats with median smoothing matching Python PaddleOCR
+        var trainStats = new TrainingStats(cfg.LogSmoothWindow, ["lr"]);
+        var iterTimer = new IterationTimer(cfg.LogSmoothWindow, cfg.PrintBatchStep);
         var stepWatch = Stopwatch.StartNew();
         var distillMismatchWarned = false;
         var diagnosticsLogged = false;
+        var samplePredLogInterval = Math.Max(cfg.PrintBatchStep * 10, 100); // Log sample predictions periodically
 
         if (cfg.ResumeTraining)
         {
@@ -193,6 +197,11 @@ internal sealed class ConfigDrivenRecTrainer
                 dropLast: cfg.TrainDropLast,
                 sampler: trainSampler))
             {
+                iterTimer.StartReader();
+                // Data already loaded by GetBatches
+                iterTimer.EndReader();
+                iterTimer.StartBatch();
+
                 using var x = torch.tensor(batchData.Images, dtype: ScalarType.Float32).reshape(batchData.Batch, 3, batchData.Height, batchData.Width).to(dev);
                 using var yCtc = torch.tensor(batchData.LabelCtc, dtype: ScalarType.Int64).reshape(batchData.Batch, cfg.MaxTextLength).to(dev);
                 using var yGtc = torch.tensor(batchData.LabelGtc, dtype: ScalarType.Int64).reshape(batchData.Batch, cfg.MaxTextLength).to(dev);
@@ -336,10 +345,11 @@ internal sealed class ConfigDrivenRecTrainer
                 }
 
                 var shouldUpdate = gradAccumulator.ShouldUpdate();
+                float stepGradNorm = 0f;
                 if (gradsOk && shouldUpdate)
                 {
-                    var gradNorm = EstimateGradNorm(model);
-                    if (gradNorm > 0f)
+                    stepGradNorm = EstimateGradNorm(model);
+                    if (stepGradNorm > 0f)
                     {
                         nonZeroGradSteps++;
                     }
@@ -365,9 +375,35 @@ internal sealed class ConfigDrivenRecTrainer
                     _ = recentLoss.Dequeue();
                 }
 
+                // Extract individual loss components from lossDict
+                var lossComponents = new Dictionary<string, float>();
+                foreach (var (lk, lv) in lossDict)
+                {
+                    if (lk != "loss")
+                    {
+                        try { lossComponents[lk] = lv.ToSingle(); } catch { /* ignore non-scalar */ }
+                    }
+                }
+
+                // Update TrainingStats with all loss components (median smoothing)
+                var statsUpdate = new Dictionary<string, float>
+                {
+                    ["loss"] = lossVal,
+                    ["lr"] = (float)lrScheduler.CurrentLR,
+                    ["grad_norm"] = stepGradNorm
+                };
+                foreach (var (ck, cv) in lossComponents)
+                {
+                    statsUpdate[ck] = cv;
+                }
+                trainStats.Update(statsUpdate);
+
+                iterTimer.EndBatch(batchData.Batch);
+
                 if (globalStep % cfg.PrintBatchStep == 0)
                 {
                     var smoothedLoss = recentLoss.Count == 0 ? lossVal : recentLoss.Average();
+                    var smoothedStats = trainStats.Get();
                     var stepMs = stepWatch.Elapsed.TotalMilliseconds;
                     stepWatch.Restart();
                     var meanTargetLen = batchData.Lengths.Length == 0 ? 0f : (float)batchData.Lengths.Average();
@@ -380,45 +416,75 @@ internal sealed class ConfigDrivenRecTrainer
                         blankRatio = blankCount;
                     }
 
-                    AppendJsonLine(
-                        tracePath,
-                        new
-                        {
-                            epoch,
-                            global_step = globalStep,
-                            loss = lossVal,
-                            base_loss = baseLossVal,
-                            kd_loss = kdLossVal,
-                            smooth_loss = smoothedLoss,
-                            lr = lrScheduler.CurrentLR,
-                            batch = batchData.Batch,
-                            height = batchData.Height,
-                            width = batchData.Width,
-                            ctc_time_steps = ctcTime,
-                            target_len_mean = meanTargetLen,
-                            effective_batch = batchData.Batch - ctcLens.EmptyTargets,
-                            ctc_truncated_by_time = ctcLens.TruncatedByTime,
-                            ctc_truncated_by_input = ctcLens.TruncatedByInput,
-                            ctc_truncated_by_repeat = ctcLens.TruncatedByRepeatConstraint,
-                            ctc_empty_targets = ctcLens.EmptyTargets,
-                            step_ms = stepMs,
-                            ctc_blank_ratio = blankRatio,
-                            optimizer_step_count = optimizerStepCount,
-                            non_zero_grad_steps = nonZeroGradSteps
-                        });
+                    // Build loss components for JSONL trace
+                    var traceObj = new Dictionary<string, object?>
+                    {
+                        ["epoch"] = epoch,
+                        ["global_step"] = globalStep,
+                        ["loss"] = lossVal,
+                        ["base_loss"] = baseLossVal,
+                        ["kd_loss"] = kdLossVal,
+                        ["smooth_loss"] = smoothedLoss,
+                        ["lr"] = lrScheduler.CurrentLR,
+                        ["grad_norm"] = stepGradNorm,
+                        ["batch"] = batchData.Batch,
+                        ["height"] = batchData.Height,
+                        ["width"] = batchData.Width,
+                        ["ctc_time_steps"] = ctcTime,
+                        ["target_len_mean"] = meanTargetLen,
+                        ["effective_batch"] = batchData.Batch - ctcLens.EmptyTargets,
+                        ["ctc_truncated_by_time"] = ctcLens.TruncatedByTime,
+                        ["ctc_truncated_by_input"] = ctcLens.TruncatedByInput,
+                        ["ctc_truncated_by_repeat"] = ctcLens.TruncatedByRepeatConstraint,
+                        ["ctc_empty_targets"] = ctcLens.EmptyTargets,
+                        ["step_ms"] = stepMs,
+                        ["avg_reader_cost"] = iterTimer.AvgReaderCost,
+                        ["avg_batch_cost"] = iterTimer.AvgBatchCost,
+                        ["ips"] = iterTimer.AvgBatchCost > 0 ? batchData.Batch / iterTimer.AvgBatchCost : 0,
+                        ["ctc_blank_ratio"] = blankRatio,
+                        ["optimizer_step_count"] = optimizerStepCount,
+                        ["non_zero_grad_steps"] = nonZeroGradSteps
+                    };
+                    // Add individual loss components
+                    foreach (var (ck, cv) in lossComponents)
+                    {
+                        traceObj[ck] = cv;
+                    }
+                    // Add smoothed values
+                    foreach (var (sk, sv) in smoothedStats)
+                    {
+                        traceObj[$"smooth_{sk}"] = sv;
+                    }
+
+                    AppendJsonLine(tracePath, traceObj);
+
+                    // Build loss components log string
+                    var lossCompStr = lossComponents.Count > 0
+                        ? " " + string.Join(" ", lossComponents.Select(kv => $"{kv.Key}={kv.Value:F4}"))
+                        : "";
                     _logger.LogInformation(
-                        "train step epoch={Epoch} step={Step} loss={Loss:F4} base_loss={BaseLoss:F4} kd_loss={KdLoss} smooth_loss={Smooth:F4} lr={Lr:F6} ctc_time={CtcTime} tgt_len_mean={TargetLen:F2} step_ms={StepMs:F1} ctc_blank_ratio={BlankRatio}",
-                        epoch,
+                        "epoch: [{Epoch}/{Total}], global_step: {Step}, loss: {Loss:F6}, base_loss: {BaseLoss:F6},{LossComp} kd_loss: {KdLoss}, smooth_loss: {Smooth:F6}, lr: {Lr:F6}, grad_norm: {GradNorm:F4}, avg_reader_cost: {ReaderCost:F5} s, avg_batch_cost: {BatchCost:F5} s, ips: {Ips:F2} samples/s, ctc_time: {CtcTime}, tgt_len_mean: {TargetLen:F2}, ctc_blank_ratio: {BlankRatio}",
+                        epoch, cfg.EpochNum,
                         globalStep,
                         lossVal,
                         baseLossVal,
+                        lossCompStr,
                         kdLoss is null ? "n/a" : $"{kdLossVal:F4}",
                         smoothedLoss,
                         lrScheduler.CurrentLR,
+                        stepGradNorm,
+                        iterTimer.AvgReaderCost,
+                        iterTimer.AvgBatchCost,
+                        iterTimer.AvgBatchCost > 0 ? batchData.Batch / iterTimer.AvgBatchCost : 0,
                         ctcTime,
                         meanTargetLen,
-                        stepMs,
                         blankRatio is null ? "n/a" : $"{blankRatio.Value:F4}");
+                }
+
+                // Periodic sample prediction vs ground truth logging (for debugging acc issues)
+                if (globalStep % samplePredLogInterval == 0 && ctcLogits.shape.Length >= 3)
+                {
+                    LogSamplePredictions(ctcLogits, batchData, ctcEncoder, cfg.MaxTextLength, globalStep, epoch);
                 }
 
                 if (shouldUpdate || globalStep == 1)
@@ -1223,6 +1289,68 @@ internal sealed class ConfigDrivenRecTrainer
         }
 
         return (float)Math.Sqrt(sum);
+    }
+
+    /// <summary>
+    /// Log sample predictions vs ground truth for debugging accuracy issues.
+    /// Shows a few samples from the current batch to help diagnose
+    /// why accuracy is not improving during training.
+    /// </summary>
+    private void LogSamplePredictions(
+        Tensor ctcLogits,
+        ConfigRecBatch batchData,
+        Data.LabelEncoders.CTCLabelEncode ctcEncoder,
+        int maxTextLength,
+        int globalStep,
+        int epoch)
+    {
+        try
+        {
+            using var preds = ctcLogits.argmax(2).cpu(); // [B, T]
+            var predsData = preds.data<long>().ToArray();
+            var timeSteps = (int)ctcLogits.shape[1];
+            var numSamples = Math.Min(3, batchData.Batch); // Show up to 3 samples
+
+            for (var i = 0; i < numSamples; i++)
+            {
+                // Decode predicted text (CTC greedy decode: remove duplicates and blanks)
+                var predChars = new StringBuilder();
+                long prevIdx = -1;
+                for (var t = 0; t < timeSteps; t++)
+                {
+                    var idx = predsData[i * timeSteps + t];
+                    if (idx != 0 && idx != prevIdx) // skip blank (0) and duplicates
+                    {
+                        if (idx - 1 >= 0 && idx - 1 < ctcEncoder.Characters.Count)
+                        {
+                            predChars.Append(ctcEncoder.Characters[(int)(idx - 1)]);
+                        }
+                    }
+                    prevIdx = idx;
+                }
+
+                // Decode ground truth
+                var gtChars = new StringBuilder();
+                for (var t = 0; t < maxTextLength; t++)
+                {
+                    var idx = batchData.LabelCtc[i * maxTextLength + t];
+                    if (idx == 0) break; // blank/padding
+                    if (idx - 1 >= 0 && idx - 1 < ctcEncoder.Characters.Count)
+                    {
+                        gtChars.Append(ctcEncoder.Characters[(int)(idx - 1)]);
+                    }
+                }
+
+                var isMatch = predChars.ToString() == gtChars.ToString();
+                _logger.LogInformation(
+                    "sample_pred epoch={Epoch} step={Step} sample={SampleIdx} pred=\"{Pred}\" gt=\"{Gt}\" match={Match}",
+                    epoch, globalStep, i, predChars.ToString(), gtChars.ToString(), isMatch);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to log sample predictions at step {Step}", globalStep);
+        }
     }
 
     private static void EnsureCharsetCoverage(

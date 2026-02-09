@@ -85,6 +85,13 @@ internal sealed class SimpleDetTrainer
             eps: 1e-6f);
         dbLoss.to(dev);
 
+        // Training stats with median smoothing (matching Python PaddleOCR)
+        var trainStats = new TrainingStats(cfg.LogSmoothWindow, ["lr"]);
+        var iterTimer = new IterationTimer(cfg.LogSmoothWindow, cfg.PrintBatchStep);
+        var tracePath = Path.Combine(cfg.SaveModelDir, "det_train_trace.jsonl");
+        var epochTracePath = Path.Combine(cfg.SaveModelDir, "det_train_history.jsonl");
+        File.WriteAllText(tracePath, string.Empty); // reset trace
+
         float bestFscore = -1f;
         var epochsCompleted = 0;
         var staleEpochs = 0;
@@ -92,6 +99,7 @@ internal sealed class SimpleDetTrainer
         var earlyStopReason = string.Empty;
         var nanDetected = false;
         var stopTraining = false;
+        var globalStep = 0;
         for (var epoch = 1; epoch <= cfg.EpochNum; epoch++)
         {
             var sw = Stopwatch.StartNew();
@@ -106,8 +114,16 @@ internal sealed class SimpleDetTrainer
             model.train();
             var lossSum = 0f;
             var samples = 0;
+            var batchIdx = 0;
+            var totalBatches = (trainSet.Count + cfg.BatchSize - 1) / cfg.BatchSize;
             foreach (var (images, shrinkMaps, shrinkMasks, thresholdMaps, thresholdMasks, batch) in trainSet.GetBatches(cfg.BatchSize, true, rng))
             {
+                iterTimer.StartReader();
+                // Data is already loaded in GetBatches
+                iterTimer.EndReader();
+
+                iterTimer.StartBatch();
+
                 using var x = torch.tensor(images, dtype: ScalarType.Float32).reshape(batch, 3, size, size).to(dev);
                 using var gtShrinkMap = torch.tensor(shrinkMaps, dtype: ScalarType.Float32).reshape(batch, size, size).to(dev);
                 using var gtShrinkMask = torch.tensor(shrinkMasks, dtype: ScalarType.Float32).reshape(batch, size, size).to(dev);
@@ -134,16 +150,53 @@ internal sealed class SimpleDetTrainer
                 var losses = dbLoss.Forward(predictions, batchDict);
                 using var loss = losses["loss"];
                 var lossValue = loss.ToSingle();
+
+                // Extract individual loss components
+                float lossShrinkVal = 0f, lossThreshVal = 0f, lossBinaryVal = 0f;
+                if (losses.TryGetValue("loss_shrink_maps", out var lossShrink))
+                {
+                    lossShrinkVal = lossShrink.ToSingle();
+                    lossShrink.Dispose();
+                }
+                if (losses.TryGetValue("loss_threshold_maps", out var lossThresh))
+                {
+                    lossThreshVal = lossThresh.ToSingle();
+                    lossThresh.Dispose();
+                }
+                if (losses.TryGetValue("loss_binary_maps", out var lossBinary))
+                {
+                    lossBinaryVal = lossBinary.ToSingle();
+                    lossBinary.Dispose();
+                }
+
                 if (cfg.NanGuard && !IsFinite(lossValue))
                 {
                     nanDetected = true;
                     earlyStopReason = "nan_guard";
                     stopTraining = true;
-                    _logger.LogError("det nan guard triggered at epoch={Epoch}: loss is NaN/Inf", epoch);
+                    _logger.LogError("det nan guard triggered at epoch={Epoch} step={Step}: loss is NaN/Inf", epoch, globalStep);
+                    AppendJsonLine(tracePath, new
+                    {
+                        event_type = "nan_guard",
+                        epoch,
+                        global_step = globalStep,
+                        loss = lossValue,
+                        loss_shrink_maps = lossShrinkVal,
+                        loss_threshold_maps = lossThreshVal,
+                        loss_binary_maps = lossBinaryVal
+                    });
                     break;
                 }
 
                 loss.backward();
+
+                // Compute gradient norm for diagnostics
+                var gradNorm = EstimateGradNorm(model);
+                if (float.IsNaN(gradNorm) || float.IsInfinity(gradNorm))
+                {
+                    _logger.LogWarning("det gradient norm is NaN/Inf at step {Step}", globalStep);
+                }
+
                 if (cfg.GradClipNorm > 0f)
                 {
                     torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.GradClipNorm);
@@ -152,6 +205,60 @@ internal sealed class SimpleDetTrainer
                 optimizer.step();
                 lossSum += lossValue * batch;
                 samples += batch;
+                globalStep++;
+
+                iterTimer.EndBatch(batch);
+
+                // Update training stats with all loss components (matching Python PaddleOCR)
+                trainStats.Update(new Dictionary<string, float>
+                {
+                    ["loss"] = lossValue,
+                    ["loss_shrink_maps"] = lossShrinkVal,
+                    ["loss_threshold_maps"] = lossThreshVal,
+                    ["loss_binary_maps"] = lossBinaryVal,
+                    ["lr"] = lr,
+                    ["grad_norm"] = gradNorm
+                });
+
+                // Per-iteration logging (matching Python PaddleOCR format)
+                if (globalStep % cfg.PrintBatchStep == 0 || batchIdx >= totalBatches - 1)
+                {
+                    var smoothed = trainStats.Get();
+                    var eta = iterTimer.GetEta(epoch, cfg.EpochNum, batchIdx, totalBatches);
+                    _logger.LogInformation(
+                        "epoch: [{Epoch}/{Total}], global_step: {Step}, {StatsLog}, avg_reader_cost: {ReaderCost:F5} s, avg_batch_cost: {BatchCost:F5} s, avg_samples: {AvgSamples}, ips: {Ips:F2} samples/s, eta: {Eta}",
+                        epoch, cfg.EpochNum, globalStep,
+                        trainStats.Log(),
+                        iterTimer.AvgReaderCost,
+                        iterTimer.AvgBatchCost,
+                        batch,
+                        iterTimer.AvgBatchCost > 0 ? batch / iterTimer.AvgBatchCost : 0,
+                        eta);
+
+                    // Per-iteration JSONL trace
+                    AppendJsonLine(tracePath, new
+                    {
+                        epoch,
+                        global_step = globalStep,
+                        loss = lossValue,
+                        loss_shrink_maps = lossShrinkVal,
+                        loss_threshold_maps = lossThreshVal,
+                        loss_binary_maps = lossBinaryVal,
+                        smooth_loss = smoothed.GetValueOrDefault("loss"),
+                        smooth_loss_shrink = smoothed.GetValueOrDefault("loss_shrink_maps"),
+                        smooth_loss_threshold = smoothed.GetValueOrDefault("loss_threshold_maps"),
+                        smooth_loss_binary = smoothed.GetValueOrDefault("loss_binary_maps"),
+                        lr,
+                        grad_norm = gradNorm,
+                        batch,
+                        avg_reader_cost = iterTimer.AvgReaderCost,
+                        avg_batch_cost = iterTimer.AvgBatchCost,
+                        ips = iterTimer.AvgBatchCost > 0 ? batch / iterTimer.AvgBatchCost : 0,
+                        eta
+                    });
+                }
+
+                batchIdx++;
             }
 
             if (stopTraining)
@@ -176,17 +283,26 @@ internal sealed class SimpleDetTrainer
 
             var trainLoss = lossSum / Math.Max(1, samples);
             _logger.LogInformation(
-                "epoch={Epoch}/{Total} train_loss={Loss:F4} eval_p={P:F4} eval_r={R:F4} eval_f={F:F4} eval_iou={IoU:F4}",
-                epoch, cfg.EpochNum, trainLoss, metrics.Precision, metrics.Recall, metrics.Fscore, metrics.Iou);
-            AppendHistory(cfg.SaveModelDir, new DetTrainHistoryEntry(
-                Epoch: epoch,
-                TrainLoss: trainLoss,
-                EvalPrecision: metrics.Precision,
-                EvalRecall: metrics.Recall,
-                EvalFscore: metrics.Fscore,
-                EvalIou: metrics.Iou,
-                LearningRate: lr,
-                EpochTimeMs: sw.Elapsed.TotalMilliseconds));
+                "epoch={Epoch}/{Total} train_loss={Loss:F4} eval_p={P:F4} eval_r={R:F4} eval_f={F:F4} eval_iou={IoU:F4} lr={Lr:F6} time={Time:F1}s",
+                epoch, cfg.EpochNum, trainLoss, metrics.Precision, metrics.Recall, metrics.Fscore, metrics.Iou, lr, sw.Elapsed.TotalSeconds);
+
+            // Log eval metrics to JSONL
+            AppendJsonLine(epochTracePath, new
+            {
+                event_type = "epoch_end",
+                epoch,
+                global_step = globalStep,
+                train_loss = trainLoss,
+                eval_precision = metrics.Precision,
+                eval_recall = metrics.Recall,
+                eval_fscore = metrics.Fscore,
+                eval_iou = metrics.Iou,
+                best_fscore = bestFscore,
+                lr,
+                epoch_time_ms = sw.Elapsed.TotalMilliseconds,
+                stale_epochs = staleEpochs
+            });
+
             epochsCompleted = epoch;
             if (cfg.EarlyStopPatience > 0 && staleEpochs >= cfg.EarlyStopPatience)
             {
@@ -421,11 +537,33 @@ internal sealed class SimpleDetTrainer
         File.WriteAllText(Path.Combine(saveDir, "det_train_history.jsonl"), string.Empty);
     }
 
-    private static void AppendHistory(string saveDir, DetTrainHistoryEntry entry)
+    /// <summary>
+    /// Estimate gradient L2 norm across all parameters.
+    /// Critical for detecting vanishing/exploding gradients.
+    /// </summary>
+    private static float EstimateGradNorm(Module model)
     {
-        File.AppendAllText(
-            Path.Combine(saveDir, "det_train_history.jsonl"),
-            JsonSerializer.Serialize(entry) + Environment.NewLine);
+        double totalNorm = 0;
+        foreach (var param in model.parameters())
+        {
+            var grad = param.grad;
+            if (grad is not null)
+            {
+                using var gradCpu = grad.cpu().to_type(ScalarType.Float32);
+                var values = gradCpu.data<float>().ToArray();
+                for (var i = 0; i < values.Length; i++)
+                {
+                    var v = values[i];
+                    totalNorm += v * v;
+                }
+            }
+        }
+        return (float)Math.Sqrt(totalNorm);
+    }
+
+    private static void AppendJsonLine(string filePath, object data)
+    {
+        File.AppendAllText(filePath, JsonSerializer.Serialize(data) + Environment.NewLine);
     }
 }
 
