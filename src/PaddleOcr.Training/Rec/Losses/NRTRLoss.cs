@@ -5,15 +5,17 @@ using static TorchSharp.torch.nn;
 namespace PaddleOcr.Training.Rec.Losses;
 
 /// <summary>
-/// NRTR loss with padding mask and optional label smoothing.
+/// NRTR loss with padding mask and label smoothing.
 /// Aligns target slicing behavior with Paddle rec_nrtr_loss.
+/// 1:1 restored: Python default is smoothing=True (eps=0.1).
+/// Reference: ppocr/losses/rec_nrtr_loss.py
 /// </summary>
 public sealed class NRTRLoss : IRecLoss
 {
     private readonly float _labelSmoothing;
     private readonly int _paddingIdx;
 
-    public NRTRLoss(float labelSmoothing = 0.0f, int paddingIdx = 0)
+    public NRTRLoss(float labelSmoothing = 0.1f, int paddingIdx = 0)
     {
         _labelSmoothing = labelSmoothing;
         _paddingIdx = paddingIdx;

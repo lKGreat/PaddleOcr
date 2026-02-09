@@ -63,11 +63,15 @@ public sealed class CTCLoss : IRecLoss
         // DO NOT use Reduction.Mean — PyTorch CTC divides by target_lengths
         // which produces different gradient scaling from the Python implementation.
         //
-        // CRITICAL: PaddlePaddle's WarpCTC internally normalizes gradients by T
-        // (the number of time steps), but PyTorch's CTC does NOT. Without this
-        // normalization, PyTorch gradients are T times larger (e.g. 160x for T=160),
-        // causing CTC collapse (model predicts all blanks).
-        // We normalize the per-sample loss by T to match WarpCTC behavior.
+        // 1:1 restored from ppocr/losses/rec_ctc_loss.py:
+        //   self.loss_func = nn.CTCLoss(blank=0, reduction="none")
+        //   loss = self.loss_func(predicts, labels, preds_lengths, label_lengths)
+        //   loss = loss.mean()
+        //
+        // Note: PaddlePaddle 2.x nn.CTCLoss does NOT normalize by T (input time steps).
+        // An earlier C# version divided by T to "match WarpCTC", but that was incorrect
+        // for PaddleOCR 3.x which uses paddle.nn.CTCLoss (norm_by_times=False by default).
+        // Removing /T normalization restores the correct CTC/NRTR loss balance in MultiLoss.
         var perSampleLoss = functional.ctc_loss(
             logits.log_softmax(2),
             packedTargets,
@@ -78,9 +82,6 @@ public sealed class CTCLoss : IRecLoss
 
         // Replace inf/nan with zero to prevent gradient explosions (matches zero_infinity=True)
         perSampleLoss = perSampleLoss.clamp(max: 1e6f);
-
-        // Normalize by T (input time steps) to match WarpCTC gradient normalization
-        perSampleLoss = perSampleLoss / inputLengthsTensor.to(ScalarType.Float32).clamp(min: 1);
 
         Tensor loss;
         if (_useFocalLoss)
