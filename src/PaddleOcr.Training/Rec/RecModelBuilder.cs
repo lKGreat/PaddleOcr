@@ -45,6 +45,20 @@ public static class RecModelBuilder
             "shallowcnn" => BuildShallowCNN(inChannels),
             "pplcnetsmall" or "pplcnetsmall_v3" or "pplcnetv3" => BuildPPLCNetV3(inChannels),
             "micronet" => BuildMicroNet(inChannels),
+            "repsvtr" or "rep_svtr" => BuildRepSVTR(inChannels),
+            "svtrv2" or "svtr_v2" => BuildSVTRv2(inChannels),
+            "vitparseq" or "vit_parseq" => BuildViTParseQ(inChannels),
+            "resnetfpn" or "resnet_fpn" => BuildResNetFPN(inChannels),
+            "resnet_aster" or "resnetaster" => BuildResNetAster(inChannels),
+            "resnetrfl" or "resnet_rfl" => BuildResNetRFL(inChannels),
+            "vit" => BuildViTBackbone(inChannels),
+            "resnetv2" or "resnet_v2" => BuildResNetV2(inChannels),
+            "hybridtransformer" or "hybrid_transformer" => BuildHybridTransformer(inChannels),
+            "donutswinmodel" or "donut_swin" or "donutswin" => BuildDonutSwinModel(inChannels),
+            "vary_vit_b" or "varyvitb" => BuildVaryViTB(inChannels),
+            "pphgnetv2_b4_formula" => BuildPPHGNetV2B4Formula(inChannels),
+            "pphgnetv2_b6_formula" => BuildPPHGNetV2B6Formula(inChannels),
+            "vary_vit_b_formula" => BuildVaryViTBFormula(inChannels),
             _ => BuildMobileNetV1Enhance(inChannels)
         };
     }
@@ -114,6 +128,7 @@ public static class RecModelBuilder
             "pren" or "prenhead" => new PRENHead(inChannels, outChannels),
             "unimernet" or "unimernethead" => new UniMERNetHead(inChannels, outChannels, hiddenSize, maxLen),
             "ppformulanet" or "ppformulanethead" => new PPFormulaNetHead(inChannels, outChannels, hiddenSize, maxLen),
+            "aster" or "asterhead" => new AsterHead(inChannels, outChannels, hiddenSize, maxLen),
             _ => new CTCHead(inChannels, outChannels)
         };
     }
@@ -241,6 +256,90 @@ public static class RecModelBuilder
         return (m, m.OutChannels);
     }
 
+    private static (Module<Tensor, Tensor>, int) BuildRepSVTR(int inChannels)
+    {
+        var m = new RepSVTR(inChannels);
+        return (m, m.OutChannels);
+    }
+
+    private static (Module<Tensor, Tensor>, int) BuildSVTRv2(int inChannels)
+    {
+        var m = new SVTRv2(inChannels);
+        return (m, m.OutChannels);
+    }
+
+    private static (Module<Tensor, Tensor>, int) BuildViTParseQ(int inChannels)
+    {
+        var m = new ViTParseQ(inChannels);
+        return (m, m.OutChannels);
+    }
+
+    private static (Module<Tensor, Tensor>, int) BuildResNetFPN(int inChannels)
+    {
+        var m = new ResNetFPN(inChannels);
+        return (m, m.OutChannels);
+    }
+
+    private static (Module<Tensor, Tensor>, int) BuildResNetAster(int inChannels)
+    {
+        var m = new ResNetAster(inChannels);
+        return (m, m.OutChannels);
+    }
+
+    private static (Module<Tensor, Tensor>, int) BuildResNetRFL(int inChannels)
+    {
+        var m = new ResNetRFL(inChannels);
+        return (m, m.OutChannels);
+    }
+
+    private static (Module<Tensor, Tensor>, int) BuildViTBackbone(int inChannels)
+    {
+        var m = new ViT(inChannels);
+        return (m, m.OutChannels);
+    }
+
+    private static (Module<Tensor, Tensor>, int) BuildResNetV2(int inChannels)
+    {
+        var m = new ResNetV2(inChannels);
+        return (m, m.OutChannels);
+    }
+
+    private static (Module<Tensor, Tensor>, int) BuildHybridTransformer(int inChannels)
+    {
+        var m = new HybridTransformer(inputChannel: inChannels);
+        return (m, m.OutChannels);
+    }
+
+    private static (Module<Tensor, Tensor>, int) BuildDonutSwinModel(int inChannels)
+    {
+        var m = new DonutSwinModel(inChannels);
+        return (m, m.OutChannels);
+    }
+
+    private static (Module<Tensor, Tensor>, int) BuildVaryViTB(int inChannels)
+    {
+        var m = new VaryViTB(inChannels);
+        return (m, m.OutChannels);
+    }
+
+    private static (Module<Tensor, Tensor>, int) BuildPPHGNetV2B4Formula(int inChannels)
+    {
+        var m = new PPHGNetV2B4Formula(inChannels);
+        return (m, m.OutChannels);
+    }
+
+    private static (Module<Tensor, Tensor>, int) BuildPPHGNetV2B6Formula(int inChannels)
+    {
+        var m = new PPHGNetV2B6Formula(inChannels);
+        return (m, m.OutChannels);
+    }
+
+    private static (Module<Tensor, Tensor>, int) BuildVaryViTBFormula(int inChannels)
+    {
+        var m = new VaryViTBFormula(inChannels);
+        return (m, m.OutChannels);
+    }
+
     /// <summary>
     /// 构建可选的 Transform（如 STN_ON），在 Backbone 之前。
     /// </summary>
@@ -316,52 +415,69 @@ public sealed class RecModel : Module<Tensor, Tensor>
 
     /// <summary>
     /// 支持 IRecHead 接口的前向传播，返回预测字典。
+    /// Key 命名与 Python PaddleOCR BaseModel.forward 对齐：
+    /// backbone_out, neck_out, head_out。
+    /// 参考: ppocr/modeling/architectures/base_model.py
     /// </summary>
-    public Dictionary<string, Tensor> ForwardDict(Tensor input, Dictionary<string, Tensor>? targets = null)
+    public Dictionary<string, Tensor> ForwardDict(Tensor input, Dictionary<string, Tensor>? targets = null, bool returnAllFeats = false)
     {
-        static Dictionary<string, Tensor>? BuildHeadTargets(Dictionary<string, Tensor>? src, Tensor backboneFeat, Tensor neckFeat)
-        {
-            if (src is null)
-            {
-                return new Dictionary<string, Tensor>
-                {
-                    ["backbone_feat"] = backboneFeat,
-                    ["neck_feat"] = neckFeat
-                };
-            }
+        var y = new Dictionary<string, Tensor>();
 
-            var merged = new Dictionary<string, Tensor>(src)
-            {
-                ["backbone_feat"] = backboneFeat,
-                ["neck_feat"] = neckFeat
-            };
-            return merged;
-        }
-
+        var x = input;
         if (_transform is not null)
         {
-            var transformed = _transform.call(input);
-            var featFromTransform = _backbone.call(transformed);
-            var seqFromTransform = _neck.call(featFromTransform);
-            if (_head is IRecHead recHeadFromTransform)
-            {
-                var headTargets = BuildHeadTargets(targets, featFromTransform, seqFromTransform);
-                return recHeadFromTransform.Forward(seqFromTransform, headTargets);
-            }
-
-            var logitsFromTransform = _head.call(seqFromTransform);
-            return new Dictionary<string, Tensor> { ["predict"] = logitsFromTransform };
+            x = _transform.call(x);
         }
 
-        var feat = _backbone.call(input);
-        var seq = _neck.call(feat);
+        x = _backbone.call(x);
+        y["backbone_out"] = x;
+
+        x = _neck.call(x);
+        y["neck_out"] = x;
+
         if (_head is IRecHead recHead)
         {
-            var headTargets = BuildHeadTargets(targets, feat, seq);
-            return recHead.Forward(seq, headTargets);
+            // Merge targets with intermediate features for heads that need them
+            var headTargets = targets is not null
+                ? new Dictionary<string, Tensor>(targets)
+                : new Dictionary<string, Tensor>();
+            headTargets["backbone_out"] = y["backbone_out"];
+            headTargets["neck_out"] = y["neck_out"];
+
+            var headResult = recHead.Forward(x, headTargets);
+
+            // Handle multi-head ctc_neck output
+            if (headResult.TryGetValue("ctc_neck", out var ctcNeck))
+            {
+                y["neck_out"] = ctcNeck;
+            }
+            y["head_out"] = headResult.TryGetValue("predict", out var pred)
+                ? pred
+                : headResult.Values.FirstOrDefault() ?? x;
+
+            foreach (var (key, value) in headResult)
+            {
+                y[key] = value;
+            }
+        }
+        else
+        {
+            x = _head.call(x);
+            y["head_out"] = x;
+            y["predict"] = x;
         }
 
-        var logits = _head.call(seq);
-        return new Dictionary<string, Tensor> { ["predict"] = logits };
+        if (returnAllFeats)
+        {
+            return y;
+        }
+
+        // Default: return head output only (same keys as before for backward compat)
+        if (y.ContainsKey("predict"))
+        {
+            return y;
+        }
+
+        return new Dictionary<string, Tensor> { ["predict"] = y["head_out"] };
     }
 }

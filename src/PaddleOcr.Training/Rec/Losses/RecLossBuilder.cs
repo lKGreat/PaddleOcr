@@ -38,6 +38,9 @@ public static class RecLossBuilder
             "unimernet" or "unimernetloss" => new UniMERNetLoss(),
             "ppformulanet" or "ppformulanetloss" => new PPFormulaNetLoss(),
             "enhancedctc" or "enhancedctcloss" => new EnhancedCTCLoss(),
+            "ce" or "celoss" => new CELoss(
+                labelSmoothing: GetFloat(config, "label_smoothing", 0.0f),
+                ignoreIndex: GetInt(config, "ignore_index", 0)),
             _ => new CTCLoss()
         };
     }

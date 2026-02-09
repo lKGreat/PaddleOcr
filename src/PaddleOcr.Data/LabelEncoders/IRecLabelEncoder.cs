@@ -27,7 +27,7 @@ public interface IRecLabelEncoder
 /// <summary>
 /// 标签编码结果。
 /// </summary>
-public sealed record RecLabelEncodeResult(long[] Label, int Length);
+public record RecLabelEncodeResult(long[] Label, int Length);
 
 /// <summary>
 /// Multi-label 编码结果（CTC + GTC 双标签）。

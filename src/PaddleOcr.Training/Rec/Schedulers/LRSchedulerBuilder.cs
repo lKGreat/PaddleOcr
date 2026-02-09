@@ -15,7 +15,11 @@ public static class LRSchedulerBuilder
         var maxSteps = GetInt(config, "max_steps", 0);
         var warmupSteps = GetInt(config, "warmup_steps", 0);
 
-        return name.ToLowerInvariant() switch
+        var warmupEpoch = GetIntAny(config, ["warmup_epoch", "warmup_epochs"], 0);
+        var stepsPerEpoch = GetInt(config, "steps_per_epoch", 0);
+        var warmupStepsTotal = warmupSteps > 0 ? warmupSteps : warmupEpoch * Math.Max(stepsPerEpoch, 1);
+
+        ILRScheduler inner = name.ToLowerInvariant() switch
         {
             "piecewise" or "piecewisedecay" => new PiecewiseDecay(
                 milestones: GetFloatArray(config, "milestones", [10f, 20f]),
@@ -32,7 +36,7 @@ public static class LRSchedulerBuilder
                 maxEpochs: maxEpochs,
                 warmupSteps: warmupSteps,
                 maxSteps: maxSteps),
-            "polynomial" or "polynomialdecay" => new PolynomialDecay(
+            "polynomial" or "polynomialdecay" or "linear" => new PolynomialDecay(
                 initialLr: initialLr,
                 endLr: GetFloat(config, "end_lr", Math.Max(1e-7f, initialLr * 0.01f)),
                 maxEpochs: maxEpochs,
@@ -50,8 +54,36 @@ public static class LRSchedulerBuilder
                 minLr: GetFloat(config, "min_lr", Math.Max(1e-7f, initialLr * 0.01f)),
                 cycleLength: GetInt(config, "cycle_length", 50),
                 decayFactor: GetFloat(config, "decay_factor", 0.5f)),
+            "step" or "stepdecay" => new StepDecay(
+                initialLr: initialLr,
+                stepSize: GetInt(config, "step_size", 10),
+                gamma: GetFloat(config, "gamma", 0.1f)),
+            "onecycle" or "onecycledecay" => new OneCycleDecay(
+                maxLr: initialLr,
+                minLr: GetFloat(config, "min_lr", 0.0f),
+                totalSteps: maxSteps > 0 ? maxSteps : maxEpochs * Math.Max(stepsPerEpoch, 1),
+                pctStart: GetFloat(config, "pct_start", 0.3f)),
+            "multistep" or "multistepdecay" => new MultiStepDecay(
+                initialLr: initialLr,
+                milestones: GetFloatArray(config, "milestones", [30f, 60f]).Select(f => (int)f).ToArray(),
+                gamma: GetFloat(config, "gamma", 0.1f)),
+            "twostepcosine" or "twostepcosinedecay" => new TwoStepCosineDecay(
+                initialLr: initialLr,
+                midLr: GetFloat(config, "mid_lr", initialLr * 0.1f),
+                minLr: GetFloat(config, "min_lr", Math.Max(1e-7f, initialLr * 0.01f)),
+                switchEpoch: GetInt(config, "switch_epoch", maxEpochs / 2),
+                maxEpochs: maxEpochs),
+            "const" or "constant" => new ConstLR(initialLr),
             _ => new CosineAnnealingDecay(initialLr, Math.Max(1e-7f, initialLr * 0.01f), maxEpochs, maxSteps)
         };
+
+        // Apply generic warmup wrapper if warmup is configured and not already handled
+        if (warmupStepsTotal > 0 && inner is not LinearWarmupCosine && inner is not OneCycleDecay)
+        {
+            return new LinearWarmup(inner, warmupStepsTotal, startLr: 0.0, endLr: initialLr);
+        }
+
+        return inner;
     }
 
     private static int GetIntAny(Dictionary<string, object> config, IReadOnlyList<string> keys, int defaultValue)

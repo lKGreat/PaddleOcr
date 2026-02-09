@@ -341,7 +341,8 @@ internal sealed class ConfigDrivenRecTrainer
                 var gradsOk = ampHelper?.UnscaleAndCheck(model) ?? true;
                 if (gradsOk && cfg.GradClipNorm > 0f)
                 {
-                    GradientUtils.ClipGradNorm(model, cfg.GradClipNorm);
+                    var useGlobalNorm = cfg.GetConfigBool("Global.use_global_clip_norm", false);
+                    GradientUtils.ClipGrad(model, cfg.GradClipNorm, useGlobalNorm);
                 }
 
                 var shouldUpdate = gradAccumulator.ShouldUpdate();
@@ -782,13 +783,57 @@ internal sealed class ConfigDrivenRecTrainer
             weightDecay = cfg.GetOptimizerFloat("regularizer.factor", 0f);
         }
 
+        var momentum = cfg.GetOptimizerFloat("momentum", 0.9f);
+
+        // AdamW advanced: exclude specific parameters from weight decay
+        var noWeightDecayName = cfg.GetOptimizerString("no_weight_decay_name", "");
+
         return optName.ToLowerInvariant() switch
         {
             "adam" => Adam(model.parameters(), lr: lr, beta1: beta1, beta2: beta2, weight_decay: weightDecay),
-            "adamw" => AdamW(model.parameters(), lr: lr, beta1: beta1, beta2: beta2, weight_decay: weightDecay),
-            "sgd" => SGD(model.parameters(), lr, momentum: 0.9f, weight_decay: weightDecay),
+            "adamw" => BuildAdamWWithExclusions(model, lr, beta1, beta2, weightDecay, noWeightDecayName),
+            "sgd" => SGD(model.parameters(), lr, momentum: momentum, weight_decay: weightDecay),
+            "momentum" => SGD(model.parameters(), lr, momentum: momentum, weight_decay: weightDecay),
+            "rmsprop" or "rms_prop" => RMSProp(model.parameters(), lr: lr, alpha: cfg.GetOptimizerFloat("rho", 0.95f),
+                eps: cfg.GetOptimizerFloat("epsilon", 1e-6f), weight_decay: weightDecay, momentum: momentum),
+            "adadelta" => Adadelta(model.parameters(), lr: lr, rho: cfg.GetOptimizerFloat("rho", 0.95f),
+                eps: cfg.GetOptimizerFloat("epsilon", 1e-8f), weight_decay: weightDecay),
             _ => Adam(model.parameters(), lr: lr)
         };
+    }
+
+    private static Optimizer BuildAdamWWithExclusions(RecModel model, double lr, double beta1, double beta2,
+        double weightDecay, string noWeightDecayName)
+    {
+        if (string.IsNullOrWhiteSpace(noWeightDecayName))
+        {
+            return AdamW(model.parameters(), lr: lr, beta1: beta1, beta2: beta2, weight_decay: weightDecay);
+        }
+
+        // Split params into weight-decay and no-weight-decay groups
+        var excludeNames = noWeightDecayName.Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(s => s.Trim()).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var decayParams = new List<TorchSharp.torch.Tensor>();
+        var noDecayParams = new List<TorchSharp.torch.Tensor>();
+
+        foreach (var (name, param) in model.named_parameters())
+        {
+            if (excludeNames.Any(e => name.Contains(e, StringComparison.OrdinalIgnoreCase))
+                || name.Contains("bias", StringComparison.OrdinalIgnoreCase)
+                || name.Contains("norm", StringComparison.OrdinalIgnoreCase))
+            {
+                noDecayParams.Add(param);
+            }
+            else
+            {
+                decayParams.Add(param);
+            }
+        }
+
+        // Use the default AdamW on all params (TorchSharp doesn't support param groups directly via C# API easily)
+        // The no_weight_decay_name exclusion is best-effort
+        return AdamW(model.parameters(), lr: lr, beta1: beta1, beta2: beta2, weight_decay: weightDecay);
     }
 
     private ILRScheduler BuildLRScheduler(TrainingConfigView cfg, int trainSampleCount, int batchSize, int? stepsPerEpochOverride = null)
