@@ -23,6 +23,7 @@ public static class DetModelBuilder
             "mobilenetv3" or "mobilenet_v3" => BuildDetMobileNetV3(inChannels, modelName, scale),
             "mobilenetv3_large" => BuildDetMobileNetV3(inChannels, "large", scale),
             "mobilenetv3_small" => BuildDetMobileNetV3(inChannels, "small", scale),
+            "pplcnetv3" or "pplcnet_v3" or "pplcnetv3_det" => BuildDetPPLCNetV3(inChannels, scale),
             "resnet_vd" or "resnetvd" or "resnet18_vd" => BuildDetResNetVd(inChannels, 18),
             "resnet34_vd" => BuildDetResNetVd(inChannels, 34),
             "resnet50_vd" => BuildDetResNetVd(inChannels, 50),
@@ -88,6 +89,13 @@ public static class DetModelBuilder
         int inChannels, int layers)
     {
         var m = new DetResNetVd(inChannels, layers);
+        return (m, m.OutChannels);
+    }
+
+    private static (Module<Tensor, Tensor[]>, int[]) BuildDetPPLCNetV3(
+        int inChannels, float scale)
+    {
+        var m = new DetPPLCNetV3(inChannels, scale);
         return (m, m.OutChannels);
     }
 

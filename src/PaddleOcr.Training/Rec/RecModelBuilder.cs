@@ -217,9 +217,9 @@ public static class RecModelBuilder
         return (m, m.OutChannels);
     }
 
-    private static (Module<Tensor, Tensor>, int) BuildPPLCNetV3(int inChannels)
+    private static (Module<Tensor, Tensor>, int) BuildPPLCNetV3(int inChannels, float scale = 0.95f)
     {
-        var m = new PPLCNetV3(inChannels);
+        var m = new PPLCNetV3(inChannels, scale);
         return (m, m.OutChannels);
     }
 
