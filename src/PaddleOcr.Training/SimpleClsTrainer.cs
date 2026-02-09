@@ -123,6 +123,12 @@ internal sealed class SimpleClsTrainer
                     ["grad_norm"] = gradNorm
                 });
 
+                // Periodic sample prediction vs ground truth logging (for debugging)
+                if (globalStep % (cfg.PrintBatchStep * 10) == 0)
+                {
+                    LogClsSamplePredictions(logits, labels, batch, globalStep, epoch);
+                }
+
                 // Per-iteration logging (matching Python PaddleOCR format)
                 if (globalStep % cfg.PrintBatchStep == 0 || batchIdx >= totalBatches - 1)
                 {
@@ -352,6 +358,32 @@ internal sealed class SimpleClsTrainer
     /// <summary>
     /// Estimate gradient L2 norm across all parameters.
     /// </summary>
+    /// <summary>
+    /// Log classification sample predictions vs ground truth for debugging.
+    /// </summary>
+    private void LogClsSamplePredictions(Tensor logits, long[] labels, int batch, int globalStep, int epoch)
+    {
+        try
+        {
+            using var predCpu = logits.argmax(1).cpu();
+            var predData = predCpu.data<long>().ToArray();
+            var numSamples = Math.Min(3, batch);
+            for (var i = 0; i < numSamples; i++)
+            {
+                var predClass = predData[i];
+                var gtClass = labels[i];
+                var isMatch = predClass == gtClass;
+                _logger.LogInformation(
+                    "sample_pred(cls) epoch={Epoch} step={Step} sample={SampleIdx} pred={Pred} gt={Gt} match={Match}",
+                    epoch, globalStep, i, predClass, gtClass, isMatch);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to log cls sample predictions at step {Step}", globalStep);
+        }
+    }
+
     private static float EstimateGradNorm(Module model)
     {
         double totalNorm = 0;

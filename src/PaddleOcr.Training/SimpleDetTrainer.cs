@@ -220,6 +220,12 @@ internal sealed class SimpleDetTrainer
                     ["grad_norm"] = gradNorm
                 });
 
+                // Periodic sample prediction vs ground truth logging (for debugging)
+                if (globalStep % (cfg.PrintBatchStep * 10) == 0)
+                {
+                    LogDetSamplePredictions(pred, shrinkMaps, size, batch, globalStep, epoch);
+                }
+
                 // Per-iteration logging (matching Python PaddleOCR format)
                 if (globalStep % cfg.PrintBatchStep == 0 || batchIdx >= totalBatches - 1)
                 {
@@ -541,6 +547,41 @@ internal sealed class SimpleDetTrainer
     /// Estimate gradient L2 norm across all parameters.
     /// Critical for detecting vanishing/exploding gradients.
     /// </summary>
+    /// <summary>
+    /// Log detection sample predictions vs ground truth for debugging.
+    /// Shows predicted positive pixel ratio vs GT positive pixel ratio per sample.
+    /// </summary>
+    private void LogDetSamplePredictions(Tensor pred, float[] gtShrinkMaps, int size, int batch, int globalStep, int epoch)
+    {
+        try
+        {
+            using var predSigmoid = pred.narrow(1, 0, 1).sigmoid().cpu();
+            var predData = predSigmoid.data<float>().ToArray();
+            var area = size * size;
+            var numSamples = Math.Min(3, batch);
+            for (var i = 0; i < numSamples; i++)
+            {
+                var offset = i * area;
+                var predPositive = 0;
+                var gtPositive = 0;
+                for (var j = 0; j < area; j++)
+                {
+                    if (predData[offset + j] > 0.5f) predPositive++;
+                    if (gtShrinkMaps[offset + j] > 0.5f) gtPositive++;
+                }
+                var predRatio = (float)predPositive / area;
+                var gtRatio = (float)gtPositive / area;
+                _logger.LogInformation(
+                    "sample_pred(det) epoch={Epoch} step={Step} sample={SampleIdx} pred_positive_ratio={PredRatio:F4} gt_positive_ratio={GtRatio:F4} pred_pixels={PredPix} gt_pixels={GtPix}",
+                    epoch, globalStep, i, predRatio, gtRatio, predPositive, gtPositive);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to log det sample predictions at step {Step}", globalStep);
+        }
+    }
+
     private static float EstimateGradNorm(Module model)
     {
         double totalNorm = 0;
